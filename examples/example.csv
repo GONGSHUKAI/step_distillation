@@ -1,6 +1,7 @@
 prompt,image,seed
-"Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside.",examples/images/cat.JPG,88
+"Summer beach vacation style, a white cat wearing sunglasses sits on a surfboard. The fluffy-furred feline gazes directly at the camera with a relaxed expression. Blurred beach scenery forms the background featuring crystal-clear waters, distant green hills, and a blue sky dotted with white clouds. The cat assumes a naturally relaxed posture, as if savoring the sea breeze and warm sunlight. A close-up shot highlights the feline's intricate details and the refreshing atmosphere of the seaside.",examples/images/cat.JPG,43
 "一个狰狞的茶壶，露出凶狠的表情在对镜头说话，底下的火焰熊熊燃烧",examples/images/cup.jpg,43
 "一个卡通女孩在家里的沙发上弹吉他.",examples/images/guitar.jpeg,43
-"明亮的灯光下，一位 60 多岁、留着胡须的灰发男子的特写镜头。他坐在巴黎的一家咖啡馆里陷入沉思，思考着宇宙的历史，他的眼睛注视着画面外行走的人们，而他则一动不动地坐着。他身着羊毛大衣和纽扣衬衫，头戴棕色贝雷帽，戴着眼镜，一副教授风范。最后他闭着嘴微微一笑，仿佛找到了生命奥秘的答案。金色光影，以巴黎街道和城市为背景，35 毫米电影胶片，景深效果。",examples/images/man.jpg,1024
+"明亮的灯光下，一位 60 多岁、留着胡须的灰发男子的特写镜头。他坐在巴黎的一家咖啡馆里陷入沉思，思考着宇宙的历史，他的眼睛注视着画面外行走的人们，而他则一动不动地坐着。他身着羊毛大衣和纽扣衬衫，头戴棕色贝雷帽，戴着眼镜，一副教授风范。最后他闭着嘴微微一笑，仿佛找到了生命奥秘的答案。金色光影，以巴黎街道和城市为背景，35 毫米电影胶片，景深效果。",examples/images/man.jpg,43
 "一只毛茸茸的小怪兽跪在一根正在融化的红蜡烛旁。艺术风格为 3D 写实，注重光影和纹理。画面中的小怪物睁大眼睛、张开嘴巴凝视着火焰，充满了惊叹和好奇。它的姿势和表情传达出一种天真和活泼的气息，仿佛是第一次探索周围的世界。暖色调和戏剧性灯光进一步增强了画面的温馨氛围。",examples/images/monster.png,42
+"一个高贵的机器人朝着镜头点头挥手",examples/images/robot.jpg,43

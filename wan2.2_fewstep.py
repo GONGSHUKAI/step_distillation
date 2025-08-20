@@ -27,11 +27,17 @@ torch.set_grad_enabled(False)
 
 config = OmegaConf.load(args.config_path)
 
-pipe = Wan22FewstepInferencePipeline(config, device="cuda")
+pipe = Wan22FewstepInferencePipeline(config)
 if args.checkpoint_folder is not None:
-    state_dict = torch.load(os.path.join(args.checkpoint_folder, "generator.pt"), map_location="cpu")
-    m, u = pipe.generator.load_state_dict(state_dict, strict=True)
-
+    state_dict = torch.load(os.path.join(args.checkpoint_folder, "model.pt"), map_location="cpu")["generator_ema"]
+    new_state_dict = {}
+    for key, value in state_dict.items():
+        new_key = key.replace("_fsdp_wrapped_module.", "")
+        new_key = new_key.replace("_checkpoint_wrapped_module.", "")
+        new_key = new_key.replace("_orig_mod.", "")
+        new_state_dict[new_key] = value
+    m, u = pipe.generator.load_state_dict(new_state_dict, strict=False)
+    assert len(u) == 0, f"Unexpected keys in state_dict: {u}"
 pipe = pipe.to(device="cuda", dtype=torch.bfloat16)
 
 os.makedirs(os.path.dirname(args.output_path), exist_ok=True)

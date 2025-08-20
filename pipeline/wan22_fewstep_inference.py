@@ -5,7 +5,7 @@ from tqdm import tqdm
 from utils.dataset import masks_like
 
 class Wan22FewstepInferencePipeline(torch.nn.Module):
-    def __init__(self, args, device):
+    def __init__(self, args):
         super().__init__()
         self.timestep_shift = getattr(args, "timestep_shift", 1.0)
         # Step 1: Initialize all models
@@ -15,9 +15,11 @@ class Wan22FewstepInferencePipeline(torch.nn.Module):
         self.vae = Wan2_2_VAEWrapper()
 
         # Step 2: Initialize all bidirectional wan hyperparmeters
-        self.denoising_step_list = torch.tensor(args.denoising_step_list, dtype=torch.long, device=device)
-
+        self.denoising_step_list = torch.tensor(args.denoising_step_list, dtype=torch.long)
         self.scheduler = self.generator.get_scheduler()
+        if args.warp_denoising_step:
+            timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32)))
+            self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
     def inference(self, noise: torch.Tensor, text_prompts: List[str], wan22_image_latent : torch.Tensor = None) -> torch.Tensor:
         """
