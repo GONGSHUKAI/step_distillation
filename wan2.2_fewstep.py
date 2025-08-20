@@ -29,7 +29,7 @@ config = OmegaConf.load(args.config_path)
 
 pipe = Wan22FewstepInferencePipeline(config)
 if args.checkpoint_folder is not None:
-    state_dict = torch.load(os.path.join(args.checkpoint_folder, "model.pt"), map_location="cpu")["generator_ema"]
+    state_dict = torch.load(os.path.join(args.checkpoint_folder, "model.pt"), map_location="cpu")
     new_state_dict = {}
     for key, value in state_dict.items():
         new_key = key.replace("_fsdp_wrapped_module.", "")
