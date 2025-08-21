@@ -38,6 +38,12 @@ The videos below can be reproduced using [examples/example.csv](examples/example
           <video src="https://github.com/user-attachments/assets/c94136da-10cf-440c-8cf3-3ac9bf8fcde7" width="100%" controls loop></video>
       </td>
   </tr>
+    </tr>
+    <tr>
+      <td>
+          <video src="https://github.com/user-attachments/assets/4fe24936-dfb2-49b3-b31e-d26bbe1852b1" width="100%" controls loop></video>
+      </td>
+  </tr>
 </table>
 
 ## 📣 Updates
