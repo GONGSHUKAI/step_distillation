@@ -1,5 +1,6 @@
 <p align="center">
 <h1 align="center">Wan2.2-TI2V-5B-Turbo</h1>
+<a href="https://github.com/quanhaol/Wan2.2-TI2V-5B-Turbo"><img src="https://img.shields.io/badge/GitHub-Repository-0066cc.svg" alt="GitHub"></a>
 <a href="https://huggingface.co/quanhaol/Wan2.2-TI2V-5B-Turbo"><img src="https://img.shields.io/badge/🤗_HuggingFace-Model-ffbd45.svg" alt="HuggingFace"></a>
 <a href="https://huggingface.co/datasets/quanhaol/MagicData"><img src="https://img.shields.io/badge/🤗_HuggingFace-Dataset-ffbd45.svg" alt="HuggingFace"></a>
 
