@@ -16,32 +16,26 @@ The videos below can be reproduced using [examples/example.csv](examples/example
 <table border="0" style="width: 100%; text-align: left; margin-top: 20px;">
   <tr>
       <td>
-          <video src="https://github.com/user-attachments/assets/11f3904b-7f3f-4da6-9ab2-3f000e93f1f6" width="100%" controls loop></video>
+          <video src="examples/videos/cat.mp4" width="100%" controls loop></video>
       </td>
       <td>
-          <video src="https://github.com/user-attachments/assets/0a85897f-be72-47e2-996b-9e227e30cbe6" width="100%" controls loop></video>
+          <video src="examples/videos/cup.mp4" width="100%" controls loop></video>
       </td>
   </tr>
   <tr>
       <td>
-          <video src="https://github.com/user-attachments/assets/40e02c95-fa10-48c2-8a83-b6ffd9560b16" width="100%" controls loop></video>
+          <video src="examples/videos/tokyo.mp4" width="100%" controls loop></video>
       </td>
       <td>
-          <video src="https://github.com/user-attachments/assets/36f16286-5d8b-40e5-96a1-6670442758e1" width="100%" controls loop></video>
-      </td>
-  </tr>
-    <tr>
-      <td>
-          <video src="https://github.com/user-attachments/assets/1f7ba5f3-b1c8-4553-94a0-b73d5db97015" width="100%" controls loop></video>
-      </td>
-      <td>
-          <video src="https://github.com/user-attachments/assets/c94136da-10cf-440c-8cf3-3ac9bf8fcde7" width="100%" controls loop></video>
+          <video src="examples/videos/monster.mp4" width="100%" controls loop></video>
       </td>
   </tr>
-    </tr>
-    <tr>
+  <tr>
       <td>
-          <video src="https://github.com/user-attachments/assets/4fe24936-dfb2-49b3-b31e-d26bbe1852b1" width="100%" controls loop></video>
+          <video src="examples/videos/man.mp4" width="100%" controls loop></video>
+      </td>
+      <td>
+          <video src="examples/videos/robot.mp4" width="100%" controls loop></video>
       </td>
   </tr>
 </table>
