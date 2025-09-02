@@ -78,6 +78,7 @@ bash running_scripts/inference/Wan2.2/i2v_fewstep.sh
 
 We would like to express our gratitude to the following open-source projects that have been instrumental in the development of our project:
 
+- [MagicMotion](https://github.com/quanhaol/MagicMotion)
 - [CausVid](https://github.com/tianweiy/CausVid)
 - [Self-Forcing](https://github.com/guandeh17/Self-Forcing)
 - [Self-Forcing-Plus](https://github.com/GoatWu/Self-Forcing-Plus)
