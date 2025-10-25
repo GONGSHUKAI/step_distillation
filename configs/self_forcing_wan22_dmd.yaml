@@ -3,19 +3,19 @@ i2v: false # used for Wan2.1
 generator_fsdp_wrap_strategy: size
 real_score_fsdp_wrap_strategy: size
 fake_score_fsdp_wrap_strategy: size
-real_name: Wan2.2-TI2V-5B
-fake_name: Wan2.2-TI2V-5B
-generator_type: bidirectional
-generator_name: Wan2.2-TI2V-5B
+real_name: Wan2.2-TI2V-5B      # 教师模型（teacher）
+fake_name: Wan2.2-TI2V-5B      # 判别器模型（critic）
+generator_type: bidirectional   # 使用双向扩散模型
+generator_name: Wan2.2-TI2V-5B # 学生模型（student）
 text_encoder_fsdp_wrap_strategy: size
 image_encoder_fsdp_wrap_strategy: size
 text_encoder_cpu_offload: true
-denoising_step_list:
+denoising_step_list:  # 蒸馏的时间步
 - 1000
 - 750
 - 500
 - 250
-warp_denoising_step: true # need to remove - 0 in denoising_step_list if warp_denoising_step is true
+warp_denoising_step: true # need to remove - 0 in denoising_step_list if warp_denoising_step is true, 将离散步数映射到连续时间步
 ts_schedule: false
 num_train_timestep: 1000
 timestep_shift: 5.0
@@ -23,10 +23,10 @@ guidance_scale: 6.0
 denoising_loss_type: x0
 mixed_precision: true
 seed: 0
-wandb_host: WANDB_HOST
-wandb_key: WANDB_KEY
-wandb_entity: WANDB_ENTITY
-wandb_project: WANDB_PROJECT
+wandb_host: https://api.wandb.ai
+wandb_key: afa4e78959b05201e369f448504697737237fc5c
+wandb_entity: shukai_gong
+wandb_project: wan2.2-distill
 sharding_strategy: full
 lr: 5.0e-07
 lr_critic: 1.0e-07
@@ -50,8 +50,8 @@ image_or_video_shape:
 num_frames: 121
 h: 704
 w: 1280
-distribution_loss: dmd
-trainer: score_distillation_wan22
+distribution_loss: dmd              # 使用 DMD 损失
+trainer: score_distillation_wan22   # 使用 Wan2.2 专用的分数蒸馏训练器
 gradient_checkpointing: true
 num_frame_per_block: 31
 num_training_frames: 31

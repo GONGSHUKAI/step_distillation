@@ -14,7 +14,9 @@ import torch
 import wandb
 import time
 import os
+import logging
 
+logger = logging.getLogger()
 
 class Trainer:
     def __init__(self, config):
@@ -28,12 +30,13 @@ class Trainer:
         launch_distributed_job()
         global_rank = dist.get_rank()
         self.world_size = dist.get_world_size()
-
+        print("Setting up the distributed environment...") if dist.get_rank() == 0 else None
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
         self.device = torch.cuda.current_device()
         self.is_main_process = global_rank == 0
         self.causal = config.causal
         self.disable_wandb = config.disable_wandb
+        print(f"Using wandb: {not self.disable_wandb}") if dist.get_rank() == 0 else None
 
         # use a random seed for the training
         if config.seed == 0:
@@ -49,14 +52,16 @@ class Trainer:
                 config=OmegaConf.to_container(config, resolve=True),
                 name=config.config_name,
                 mode="online",
-                entity=config.wandb_entity,
+                # entity=config.wandb_entity,
                 project=config.wandb_project,
                 dir=config.wandb_save_dir
             )
 
         self.output_path = config.logdir
+        print(f"Finished setting up the distributed environment.") if dist.get_rank() == 0 else None
 
         # Step 2: Initialize the model and optimizer
+        print("Initializing the distillation model...") if dist.get_rank() == 0 else None
         if config.distribution_loss == "causvid":
             self.model = CausVid(config, device=self.device)
         elif config.distribution_loss == "dmd":
@@ -65,6 +70,7 @@ class Trainer:
             self.model = SiD(config, device=self.device)
         else:
             raise ValueError("Invalid distribution matching loss")
+        print(f"Initialized distillation model: {config.distribution_loss}") if dist.get_rank() == 0 else None
 
         # Resume Training from Latest Checkpoint
         pretrained_ckpt_path, self.step = self.load(self.output_path)
@@ -78,6 +84,7 @@ class Trainer:
         # Save pretrained model state_dicts to CPU
         self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
 
+        print("Wrapping model components with FSDP...") if dist.get_rank() == 0 else None
         self.model.generator = fsdp_wrap(
             self.model.generator,
             sharding_strategy=config.sharding_strategy,
@@ -109,7 +116,8 @@ class Trainer:
 
         self.model.vae = self.model.vae.to(
             device=self.device, dtype=torch.bfloat16 if config.mixed_precision else torch.float32)
-
+        print("Finished wrapping model components with FSDP.") if dist.get_rank() == 0 else None
+        print("Setting up optimizers...") if dist.get_rank() == 0 else None
         self.generator_optimizer = torch.optim.AdamW(
             [param for param in self.model.generator.parameters()
              if param.requires_grad],
@@ -125,8 +133,10 @@ class Trainer:
             betas=(config.beta1_critic, config.beta2_critic),
             weight_decay=config.weight_decay
         )
+        print("Finished setting up optimizers.") if dist.get_rank() == 0 else None
 
         # Step 3: Initialize the dataloader
+        print("Setting up dataset and dataloader...") if dist.get_rank() == 0 else None
         dataset = ODERegressionCSVDataset(
             config.data_path, 
             max_pair=int(1e8), 
@@ -151,9 +161,11 @@ class Trainer:
         if dist.get_rank() == 0:
             print("DATASET SIZE %d" % len(dataset))
         self.dataloader = cycle(dataloader)
+        print("Finished setting up dataset and dataloader.") if dist.get_rank() == 0 else None
 
         ##############################################################################################################
         # 6. Set up EMA parameter containers
+        print("Setting up EMA parameters...") if dist.get_rank() == 0 else None
         rename_param = (
             lambda name: name.replace("_fsdp_wrapped_module.", "")
             .replace("_checkpoint_wrapped_module.", "")
@@ -170,7 +182,7 @@ class Trainer:
         self.ema_start_step = config.get("ema_start_step", 0)
         self.generator_ema = None
         if (self.ema_weight > 0.0) and (self.step >= self.ema_start_step):
-            print(f"Setting up EMA with weight {self.ema_weight}")
+            print(f"Setting up EMA with weight {self.ema_weight}") if dist.get_rank() == 0 else None
             self.generator_ema = EMA_FSDP(self.model.generator, decay=self.ema_weight)
             
             # Load EMA state dict if available in checkpoint
@@ -181,11 +193,11 @@ class Trainer:
                     self.generator_ema.load_state_dict(checkpoint_state_dict["generator_ema"])
                 else:
                     print("No generator_ema found in checkpoint, starting fresh EMA")
-
+        print("Finished setting up EMA parameters.") if dist.get_rank() == 0 else None
         ##############################################################################################################
         # 7. (If resuming) Load the model and optimizer, lr_scheduler, ema's statedicts
         if getattr(config, "generator_ckpt", False):
-            print(f"Loading pretrained generator from {config.generator_ckpt}")
+            print(f"Loading pretrained generator from {config.generator_ckpt}") if dist.get_rank() == 0 else None
             state_dict = torch.load(config.generator_ckpt, map_location="cpu")
             if "generator" in state_dict:
                 state_dict = state_dict["generator"]
@@ -206,13 +218,13 @@ class Trainer:
         self.previous_time = None
 
     def load(self, out_path):
-        # 1. 找到最新的checkpoint文件夹（按步数排序）
+        # 1. Find latest checkpoint folder (ranked by step)
         if not os.path.exists(out_path):
             return None, 0
         ckpt_folders = [f for f in os.listdir(out_path) if f.startswith("checkpoint_model_")]
         if not ckpt_folders:
             return None, 0
-        # 提取步数
+
         def extract_step(folder_name):
             import re
             match = re.search(r"checkpoint_model_(\d+)", folder_name)
@@ -220,7 +232,7 @@ class Trainer:
         ckpt_folders.sort(key=extract_step)
         latest_ckpt_folder = ckpt_folders[-1]
 
-        # 2. 读取model.pt和步数
+        # 2. read model.pt and step
         model_path = os.path.join(out_path, latest_ckpt_folder, "model.pt")
         step = extract_step(latest_ckpt_folder)
         if not os.path.exists(model_path):
@@ -269,8 +281,10 @@ class Trainer:
         image_latent = None
 
         batch_size = len(text_prompts)
-        image_or_video_shape = list(self.config.image_or_video_shape)
-        image_or_video_shape[0] = batch_size
+        # image_or_video_shape = list(self.config.image_or_video_shape)
+        # image_or_video_shape[0] = batch_size
+        _, _, _, H, W = video_tensor.shape
+        image_or_video_shape = [batch_size, 31, 48, H//16, W//16]
 
         # Step 2: Extract the conditional infos
         with torch.no_grad():
@@ -440,7 +454,7 @@ class Trainer:
 
             if self.step % self.config.gc_interval == 0:
                 if dist.get_rank() == 0:
-                    logging.info("DistGarbageCollector: Running GC.")
+                    print("DistGarbageCollector: Running GC.")
                 gc.collect()
                 torch.cuda.empty_cache()
 

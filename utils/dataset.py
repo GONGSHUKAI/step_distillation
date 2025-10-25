@@ -2,6 +2,7 @@ from utils.lmdb import get_array_shape_from_lmdb, retrieve_row_from_lmdb
 from torch.utils.data import Dataset
 import numpy as np
 import torch
+import torchaudio
 import lmdb
 import json
 from PIL import Image
@@ -10,6 +11,7 @@ import torchvision.transforms.functional as TF
 import pandas as pd
 import cv2
 import random
+import math
 from pathlib import Path
 import decord
 from torchvision.transforms.functional import resize
@@ -284,9 +286,10 @@ class ODERegressionCSVDataset(Dataset):
     def _preprocess_video(self, sample) -> torch.Tensor:
         path = sample["path"]
         num_frames = sample["num_frames"]
-        if num_frames < self.num_frames:
-            raise ValueError(f"Error: num_frames < {self.num_frames}")
-        frame_indices = list(range(self.num_frames))
+        # if num_frames < self.num_frames:
+        #     raise ValueError(f"Error: num_frames < {self.num_frames}")
+        # frame_indices = list(range(self.num_frames))
+        frame_indices = list(range(num_frames))
 
         if path.endswith(".mp4") or path.endswith(".mkv"):
             path = Path(path)
@@ -308,8 +311,20 @@ class ODERegressionCSVDataset(Dataset):
             frames = np.stack(frames)
             frames = torch.from_numpy(frames).float()
             frames = frames.permute(0, 3, 1, 2).contiguous()  # [T, C, H, W]
+        orig_w, orig_h = frames.shape[3], frames.shape[2]
+        max_pixels = self.h * self.w
+        ori_pixels = orig_w * orig_h
+        if ori_pixels <= max_pixels:
+            target_w, target_h = orig_w, orig_h
+        else:
+            aspect_ratio = orig_w / orig_h
+            target_h = int(math.sqrt(max_pixels / aspect_ratio))
+            target_w = int(target_h * aspect_ratio)
+        
+        target_h = (target_h // 32) * 32
+        target_w = (target_w // 32) * 32
 
-        video_tensor = torch.stack([resize(frame, (self.h, self.w)) for frame in frames], dim=0)
+        video_tensor = torch.stack([resize(frame, (target_h, target_w)) for frame in frames], dim=0)
         video_tensor = video_tensor.permute(1, 0, 2, 3) / 255.0
         video_tensor = video_tensor * 2 - 1
         return video_tensor
@@ -323,16 +338,140 @@ class ODERegressionCSVDataset(Dataset):
                 "video": video,
             }
         except Exception as e:
-            # 记录错误日志
             with open(self.log_file, "a") as f:
                 f.write(f"Error at index {index}: {str(e)}\n")
             print(f"Error at index {index}: {e}. Skipping this index.")
-            # 跳过当前样本，返回 None 或抛出异常
             return {
                 "prompts": "",
                 "video": torch.zeros((3, self.num_frames, self.h, self.w)),  # 占位符视频张量
             }
 
+class OviCSVDataset(Dataset):
+    def __init__(
+        self,
+        data_path: str,
+        num_frames: int = 121,
+        h: int = 704,
+        w: int = 1280,
+        audio_sample_rate: int = 16000,
+        audio_duration_secs: int = 5,
+    ):
+        """
+        A dataset for loading (text, video, audio) triplets for Ovi model training.
+        Args:
+            data_path (str): Path to the CSV file. The CSV should contain 'text', 'video_path', and 'audio_path' columns.
+            num_frames (int): The number of frames to sample from the video.
+            h (int): Target height for video resizing.
+            w (int): Target width for video resizing.
+            audio_sample_rate (int): The target sample rate for audio.
+            audio_duration_secs (int): The target duration for audio in seconds.
+        """
+        self.data = pd.read_csv(data_path)
+        self.data["text"] = self.data["text"].fillna("")
+        
+        # --- Store configuration ---
+        self.num_frames = num_frames
+        self.h = h
+        self.w = w
+        self.audio_sample_rate = audio_sample_rate
+        self.target_audio_length = self.audio_sample_rate * audio_duration_secs
+
+        self.log_file = "log/ovi_dataset_error_log.txt"
+        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+
+
+    def __len__(self):
+        return len(self.data)
+
+    def _preprocess_video(self, video_path: str) -> torch.Tensor:
+        """Loads and preprocesses a video file."""
+        path = Path(video_path)
+        video_reader = decord.VideoReader(uri=path.as_posix(), num_threads=1)
+        total_frames = len(video_reader)
+        
+        # Sample frames (simple sequential sampling)
+        if total_frames < self.num_frames:
+             # If video is too short, loop the frames
+            frame_indices = np.arange(total_frames)
+            frame_indices = np.tile(frame_indices, (self.num_frames // total_frames) + 1)[:self.num_frames]
+        else:
+            frame_indices = np.linspace(0, total_frames - 1, self.num_frames, dtype=int)
+
+        frames = torch.from_numpy(video_reader.get_batch(frame_indices).asnumpy()).float() # [T, H, W, C]
+        frames = frames.permute(0, 3, 1, 2).contiguous()  # [T, C, H, W]
+
+        # --- Dynamic resolution scaling (from your original code) ---
+        orig_w, orig_h = frames.shape[3], frames.shape[2]
+        max_pixels = self.h * self.w
+        ori_pixels = orig_w * orig_h
+        if ori_pixels <= max_pixels:
+            target_w, target_h = orig_w, orig_h
+        else:
+            aspect_ratio = orig_w / orig_h
+            target_h = int(math.sqrt(max_pixels / aspect_ratio))
+            target_w = int(target_h * aspect_ratio)
+        
+        # Snap to multiple of 32 for model compatibility
+        target_h = (target_h // 32) * 32
+        target_w = (target_w // 32) * 32
+
+        # Resize and normalize
+        video_tensor = torch.stack([resize(frame, (target_h, target_w)) for frame in frames], dim=0)
+        video_tensor = video_tensor.permute(1, 0, 2, 3) # [C, T, H, W]
+        video_tensor = (video_tensor / 255.0) * 2.0 - 1.0 # Normalize to [-1, 1]
+        
+        return video_tensor
+
+    def _preprocess_audio(self, audio_path: str) -> torch.Tensor:
+        """Loads and preprocesses an audio file."""
+        waveform, sample_rate = torchaudio.load(audio_path)
+
+        # Resample if necessary
+        if sample_rate != self.audio_sample_rate:
+            resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=self.audio_sample_rate)
+            waveform = resampler(waveform)
+
+        # Convert to mono if stereo
+        if waveform.shape[0] > 1:
+            waveform = torch.mean(waveform, dim=0, keepdim=True)
+            
+        # Pad or truncate to target length
+        current_length = waveform.shape[1]
+        if current_length > self.target_audio_length:
+            # Truncate
+            waveform = waveform[:, :self.target_audio_length]
+        elif current_length < self.target_audio_length:
+            # Pad with zeros
+            padding = self.target_audio_length - current_length
+            waveform = torch.nn.functional.pad(waveform, (0, padding))
+
+        # Normalize to [-1, 1]
+        waveform = waveform / waveform.abs().max().clamp(min=1e-5)
+            
+        return waveform.squeeze(0) # Return shape [T]
+
+    def __getitem__(self, index):
+        sample = self.data.iloc[index]
+        try:
+            video = self._preprocess_video(sample["video_path"])
+            audio = self._preprocess_audio(sample["audio_path"])
+            
+            return {
+                "prompts": sample["text"],
+                "video": video,
+                "audio": audio,
+            }
+        except Exception as e:
+            with open(self.log_file, "a") as f:
+                f.write(f"Error at index {index} (video: {sample.get('video_path', 'N/A')}, audio: {sample.get('audio_path', 'N/A')}): {str(e)}\n")
+            
+            # Return a placeholder batch to avoid crashing the training
+            return {
+                "prompts": "placeholder prompt",
+                "video": torch.zeros((3, self.num_frames, self.h, self.w)),
+                "audio": torch.zeros((self.target_audio_length,)),
+            }
+        
 def cycle(dl):
     while True:
         for data in dl:

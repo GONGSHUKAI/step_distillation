@@ -83,7 +83,7 @@ class DMD(SelfForcingModel):
             wan22_input_timestep = torch.tensor([timestep[0][0].item()], device=self.device, dtype=self.dtype)
             temp_ts = (mask2[:, :, 0, ::2, ::2] * wan22_input_timestep)
             temp_ts = temp_ts.reshape(temp_ts.shape[0], -1)
-            temp_ts = torch.cat([temp_ts, temp_ts.new_ones(self.generator.seq_len - temp_ts.size(1)) * wan22_input_timestep], dim=1)
+            temp_ts = torch.cat([temp_ts, temp_ts.new_ones(temp_ts.shape[0], self.generator.seq_len - temp_ts.size(1)) * wan22_input_timestep], dim=1)
             wan22_input_timestep = temp_ts.to(self.device, dtype=torch.long)
         else:
             mask1, mask2 = None, None
@@ -360,7 +360,7 @@ class DMD(SelfForcingModel):
             wan22_input_timestep = torch.tensor([critic_timestep[0][0].item()], device=self.device, dtype=self.dtype)
             temp_ts = (mask2[:, :, 0, ::2, ::2] * wan22_input_timestep)
             temp_ts = temp_ts.reshape(temp_ts.shape[0], -1)
-            temp_ts = torch.cat([temp_ts, temp_ts.new_ones(self.generator.seq_len - temp_ts.size(1)) * wan22_input_timestep], dim=1)
+            temp_ts = torch.cat([temp_ts, temp_ts.new_ones(temp_ts.shape[0], self.generator.seq_len - temp_ts.size(1)) * wan22_input_timestep], dim=1)
             wan22_input_timestep = temp_ts.to(self.device, dtype=torch.long)
         else:
             mask1, mask2 = None, None

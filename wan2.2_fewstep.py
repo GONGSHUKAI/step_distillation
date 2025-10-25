@@ -26,6 +26,7 @@ torch.backends.cudnn.allow_tf32 = True
 torch.set_grad_enabled(False)
 
 config = OmegaConf.load(args.config_path)
+os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
 
 pipe = Wan22FewstepInferencePipeline(config)
 if args.checkpoint_folder is not None:
@@ -39,8 +40,6 @@ if args.checkpoint_folder is not None:
     m, u = pipe.generator.load_state_dict(new_state_dict, strict=False)
     assert len(u) == 0, f"Unexpected keys in state_dict: {u}"
 pipe = pipe.to(device="cuda", dtype=torch.bfloat16)
-
-os.makedirs(os.path.dirname(args.output_path), exist_ok=True)
 
 if args.image is not None:
     img = Image.open(args.image).convert("RGB")

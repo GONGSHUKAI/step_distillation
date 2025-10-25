@@ -3,7 +3,7 @@ import os
 from omegaconf import OmegaConf
 import wandb
 
-from trainer import DiffusionTrainer, GANTrainer, ODETrainer, ScoreDistillationTrainer, Wan22ScoreDistillationTrainer
+from trainer import DiffusionTrainer, GANTrainer, ODETrainer, ScoreDistillationTrainer, Wan22ScoreDistillationTrainer, OviScoreDistillationTrainer
 
 
 def main():
@@ -11,9 +11,9 @@ def main():
     parser.add_argument("--config_path", type=str, required=True)
     parser.add_argument("--no_save", action="store_true")
     parser.add_argument("--no_visualize", action="store_true")
-    parser.add_argument("--logdir", type=str, default="", help="Path to the directory to save logs")
-    parser.add_argument("--wandb-save-dir", type=str, default="", help="Path to the directory to save wandb logs")
-    parser.add_argument("--disable-wandb", action="store_true")
+    parser.add_argument("--logdir", type=str, default="/videogen/Wan2.2-TI2V-5B-Turbo/logs/distill_anysize", help="Path to the directory to save logs")
+    parser.add_argument("--wandb-save-dir", type=str, default="/videogen/Wan2.2-TI2V-5B-Turbo", help="Path to the directory to save wandb logs")
+    parser.add_argument("--disable-wandb", default=False, action="store_true", help="Disable wandb logging")
     parser.add_argument("--data_path", type=str, default=None, help="Path to the dataset")
     parser.add_argument("--debug", action="store_true", help="Run in debug mode, no saving or visualization")
 
@@ -44,6 +44,10 @@ def main():
         trainer = ScoreDistillationTrainer(config)
     elif config.trainer == "score_distillation_wan22":
         trainer = Wan22ScoreDistillationTrainer(config)
+    elif config.trainer == "score_distillation_ovi":
+        trainer = OviScoreDistillationTrainer(config)
+    else:
+        raise ValueError(f"Unknown trainer type: {config.trainer}")
     trainer.train()
 
     wandb.finish()

@@ -9,17 +9,24 @@ class Wan22FewstepInferencePipeline(torch.nn.Module):
         super().__init__()
         self.timestep_shift = getattr(args, "timestep_shift", 1.0)
         # Step 1: Initialize all models
+        print("Initializing models...")
         self.generator_model_name = getattr(args, "generator_name", args.model_name)
         self.generator = WanDiffusionWrapper(model_name=self.generator_model_name,is_causal=False)
+        print(f"Generator model loaded: {self.generator_model_name}")
         self.text_encoder = WanTextEncoder(model_name=self.generator_model_name)
+        print(f"Text encoder model loaded")
         self.vae = Wan2_2_VAEWrapper()
+        print(f"VAE model loaded")
+        print("Models initialized.")
 
         # Step 2: Initialize all bidirectional wan hyperparmeters
+        print("Setting up denoising steps...")
         self.denoising_step_list = torch.tensor(args.denoising_step_list, dtype=torch.long)
         self.scheduler = self.generator.get_scheduler()
         if args.warp_denoising_step:
             timesteps = torch.cat((self.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32)))
             self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
+        print("Denoising steps set up.")
 
     def inference(self, noise: torch.Tensor, text_prompts: List[str], wan22_image_latent : torch.Tensor = None) -> torch.Tensor:
         """

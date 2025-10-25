@@ -26,22 +26,22 @@ class BaseModel(nn.Module):
                 self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
     def _initialize_models(self, args, device):
-        self.real_model_name = getattr(args, "real_name", "Wan2.1-T2V-14B")
-        self.fake_model_name = getattr(args, "fake_name", "Wan2.1-T2V-14B")
-        self.generator_name = getattr(args, "generator_name", "Wan2.1-T2V-14B")
+        self.real_model_name = getattr(args, "real_name", "Wan2.1-T2V-14B")         # the teacher model
+        self.fake_model_name = getattr(args, "fake_name", "Wan2.1-T2V-14B")         # the critic model
+        self.generator_name = getattr(args, "generator_name", "Wan2.1-T2V-14B")     # the student model
 
         self.generator = WanDiffusionWrapper(
             **getattr(args, "model_kwargs", {}),
             model_name=self.generator_name,
             is_causal=self.is_causal
         )
-        self.generator.model.requires_grad_(True)
+        self.generator.model.requires_grad_(True)   # student model to be trained
 
         self.real_score = WanDiffusionWrapper(model_name=self.real_model_name, is_causal=False)
-        self.real_score.model.requires_grad_(False)
+        self.real_score.model.requires_grad_(False) # teacher model, kept frozen
 
         self.fake_score = WanDiffusionWrapper(model_name=self.fake_model_name, is_causal=False)
-        self.fake_score.model.requires_grad_(True)
+        self.fake_score.model.requires_grad_(True)  # critic model to be updated
 
         self.text_encoder = WanTextEncoder(model_name=self.generator_name)
         self.text_encoder.requires_grad_(False)
