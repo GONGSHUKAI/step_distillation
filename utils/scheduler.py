@@ -147,12 +147,26 @@ class FlowMatchScheduler():
         self.timesteps = self.timesteps.to(model_output.device)
         timestep_id = torch.argmin(
             (self.timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1)
-        sigma = self.sigmas[timestep_id].reshape(-1, 1, 1, 1)
+        # Original problematic line:
+        # sigma = self.sigmas[timestep_id].reshape(-1, 1, 1, 1)
+        # Correct, generalized line:
+        # Reshape sigma to broadcast correctly with the input tensor's shape.
+        # For a 4D tensor [B*F, C, H, W], shape will be [B, 1, 1, 1].
+        # For a 2D tensor [B*L, D], shape will be [B, 1].
+        view_shape = [-1] + [1] * (sample.ndim - 1)
+        sigma = self.sigmas[timestep_id].view(view_shape)
         if to_final or (timestep_id + 1 >= len(self.timesteps)).any():
             sigma_ = 1 if (
                 self.inverse_timesteps or self.reverse_sigmas) else 0
         else:
-            sigma_ = self.sigmas[timestep_id + 1].reshape(-1, 1, 1, 1)
+            # Original problematic line:
+            # sigma_ = self.sigmas[timestep_id + 1].reshape(-1, 1, 1, 1)
+            # Correct, generalized line:
+            # Reshape sigma to broadcast correctly with the input tensor's shape.
+            # For a 4D tensor [B*F, C, H, W], shape will be [B, 1, 1, 1].
+            # For a 2D tensor [B*L, D], shape will be [B, 1].
+            sigma_ = self.sigmas[timestep_id + 1].view(view_shape)
+
         prev_sample = sample + model_output * (sigma_ - sigma)
         return prev_sample
 
@@ -160,10 +174,10 @@ class FlowMatchScheduler():
         """
         Diffusion forward corruption process.
         Input:
-            - clean_latent: the clean latent with shape [B*T, C, H, W]
-            - noise: the noise with shape [B*T, C, H, W]
+            - original_samples: the clean latent, e.g., [B*T, C, H, W] or [B*T, D]
+            - noise: the noise with the same shape as original_samples
             - timestep: the timestep with shape [B*T]
-        Output: the corrupted latent with shape [B*T, C, H, W]
+        Output: the corrupted latent with the same shape as original_samples
         """
         if timestep.ndim == 2:
             timestep = timestep.flatten(0, 1)
@@ -171,7 +185,15 @@ class FlowMatchScheduler():
         self.timesteps = self.timesteps.to(noise.device)
         timestep_id = torch.argmin(
             (self.timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1)
-        sigma = self.sigmas[timestep_id].reshape(-1, 1, 1, 1)
+        # Original problematic line:
+        # sigma = self.sigmas[timestep_id].reshape(-1, 1, 1, 1)
+
+        # Correct, generalized line:
+        # Reshape sigma to broadcast correctly with the input tensor's shape.
+        # For a 4D tensor [B*F, C, H, W], shape will be [B, 1, 1, 1].
+        # For a 2D tensor [B*L, D], shape will be [B, 1].
+        view_shape = [-1] + [1] * (original_samples.ndim - 1)
+        sigma = self.sigmas[timestep_id].view(view_shape)
         sample = (1 - sigma) * original_samples + sigma * noise
         return sample.type_as(noise)
 

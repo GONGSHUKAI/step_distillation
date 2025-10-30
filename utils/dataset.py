@@ -16,6 +16,7 @@ from pathlib import Path
 import decord
 from torchvision.transforms.functional import resize
 from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader
 
 class OffsetDistributedSampler(DistributedSampler):
     def __init__(self, dataset, initial_step=0, gpu_num=4, **kwargs):
@@ -374,7 +375,7 @@ class OviCSVDataset(Dataset):
         self.h = h
         self.w = w
         self.audio_sample_rate = audio_sample_rate
-        self.target_audio_length = self.audio_sample_rate * audio_duration_secs
+        self.target_audio_length = math.ceil(self.audio_sample_rate * audio_duration_secs // 512) * 512  # Pad to nearest multiple of 512
 
         self.log_file = "log/ovi_dataset_error_log.txt"
         os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
@@ -387,20 +388,11 @@ class OviCSVDataset(Dataset):
         """Loads and preprocesses a video file."""
         path = Path(video_path)
         video_reader = decord.VideoReader(uri=path.as_posix(), num_threads=1)
-        total_frames = len(video_reader)
-        
-        # Sample frames (simple sequential sampling)
-        if total_frames < self.num_frames:
-             # If video is too short, loop the frames
-            frame_indices = np.arange(total_frames)
-            frame_indices = np.tile(frame_indices, (self.num_frames // total_frames) + 1)[:self.num_frames]
-        else:
-            frame_indices = np.linspace(0, total_frames - 1, self.num_frames, dtype=int)
-
+        total_frames = (len(video_reader) - 1) // 4 * 4 + 1  # 4n+1
+        frame_indices = list(range(total_frames))
         frames = torch.from_numpy(video_reader.get_batch(frame_indices).asnumpy()).float() # [T, H, W, C]
         frames = frames.permute(0, 3, 1, 2).contiguous()  # [T, C, H, W]
 
-        # --- Dynamic resolution scaling (from your original code) ---
         orig_w, orig_h = frames.shape[3], frames.shape[2]
         max_pixels = self.h * self.w
         ori_pixels = orig_w * orig_h
@@ -410,46 +402,34 @@ class OviCSVDataset(Dataset):
             aspect_ratio = orig_w / orig_h
             target_h = int(math.sqrt(max_pixels / aspect_ratio))
             target_w = int(target_h * aspect_ratio)
-        
         # Snap to multiple of 32 for model compatibility
         target_h = (target_h // 32) * 32
         target_w = (target_w // 32) * 32
 
         # Resize and normalize
         video_tensor = torch.stack([resize(frame, (target_h, target_w)) for frame in frames], dim=0)
-        video_tensor = video_tensor.permute(1, 0, 2, 3) # [C, T, H, W]
+        video_tensor = video_tensor.permute(1, 0, 2, 3)   # [C, T, H, W]
         video_tensor = (video_tensor / 255.0) * 2.0 - 1.0 # Normalize to [-1, 1]
-        
-        return video_tensor
+        return video_tensor                               # Return shape [C, T, H, W]
 
     def _preprocess_audio(self, audio_path: str) -> torch.Tensor:
-        """Loads and preprocesses an audio file."""
         waveform, sample_rate = torchaudio.load(audio_path)
-
-        # Resample if necessary
         if sample_rate != self.audio_sample_rate:
             resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=self.audio_sample_rate)
             waveform = resampler(waveform)
 
-        # Convert to mono if stereo
         if waveform.shape[0] > 1:
             waveform = torch.mean(waveform, dim=0, keepdim=True)
-            
-        # Pad or truncate to target length
-        current_length = waveform.shape[1]
-        if current_length > self.target_audio_length:
-            # Truncate
+        
+        if waveform.shape[1] > self.target_audio_length:
             waveform = waveform[:, :self.target_audio_length]
-        elif current_length < self.target_audio_length:
-            # Pad with zeros
-            padding = self.target_audio_length - current_length
-            waveform = torch.nn.functional.pad(waveform, (0, padding))
-
-        # Normalize to [-1, 1]
-        waveform = waveform / waveform.abs().max().clamp(min=1e-5)
+        else:
+            waveform_len = waveform.shape[1]
+            waveform_len = waveform_len // 512 * 512
+            waveform = waveform[:, :waveform_len]
             
-        return waveform.squeeze(0) # Return shape [T]
-
+        return waveform.squeeze(0)  # Return shape [L]
+    
     def __getitem__(self, index):
         sample = self.data.iloc[index]
         try:
@@ -469,7 +449,7 @@ class OviCSVDataset(Dataset):
             return {
                 "prompts": "placeholder prompt",
                 "video": torch.zeros((3, self.num_frames, self.h, self.w)),
-                "audio": torch.zeros((self.target_audio_length,)),
+                "audio": torch.zeros((1, self.target_audio_length)),
             }
         
 def cycle(dl):
@@ -505,3 +485,93 @@ def masks_like(tensor, zero=False, generator=None, p=0.2):
                 v[0, :] = torch.zeros_like(v[0, :])
 
     return out1, out2
+
+if __name__ == '__main__':
+    CSV_PATH = "/videogen/Wan2.2-TI2V-5B-Turbo/data/matrix_audio.csv"
+    NUM_FRAMES = 121  # Use a number of frames that matches your CSV, e.g., 63
+    TARGET_H = 704   # Example target resolution
+    TARGET_W = 1280  # Example target resolution
+    AUDIO_SAMPLE_RATE = 16000
+    AUDIO_DURATION_SECS = 5
+    # DataLoader parameters
+    BATCH_SIZE = 1 # Use a batch size > 1 to test collation
+
+    print("=" * 60)
+    print("Testing OviCSVDataset and DataLoader Output...")
+    print("=" * 60)
+
+    # 1. Instantiate the dataset
+    try:
+        dataset = OviCSVDataset(
+            data_path=CSV_PATH,
+            num_frames=NUM_FRAMES,
+            h=TARGET_H,
+            w=TARGET_W,
+            audio_sample_rate=AUDIO_SAMPLE_RATE,
+            audio_duration_secs=AUDIO_DURATION_SECS,
+        )
+        print(f"✓ Dataset initialized successfully with {len(dataset)} samples.")
+    except Exception as e:
+        print(f"✗ Error initializing dataset: {e}")
+        print("  Please ensure the CSV file exists at the specified path and is correctly formatted.")
+        exit()
+
+    # 2. Create a DataLoader
+    data_loader = DataLoader(
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=0 # Set to 0 for simple testing, can be increased for performance
+    )
+    print(f"✓ DataLoader created with batch size {BATCH_SIZE}.")
+
+    # 3. Fetch and inspect one batch
+    try:
+        print("\nFetching one batch...")
+        batch = next(iter(data_loader))
+        print("✓ Batch fetched successfully.")
+
+        # 4. Verify the contents and shapes
+        print("\n--- Batch Content Verification ---")
+        video_tensor = batch["video"]
+        audio_tensor = batch["audio"]
+        prompts = batch["prompts"]
+
+        print(f"  - Prompts:")
+        print(f"    - Type: {type(prompts)}")
+        print(f"    - Length: {len(prompts)} (should match batch size of {BATCH_SIZE})")
+        print(f"    - Example prompt: '{prompts[0][:80]}...'")
+
+        print(f"\n  - Video Tensor:")
+        print(f"    - Shape: {video_tensor.shape}")
+        print(f"    - Dtype: {video_tensor.dtype}")
+        print(f"    - Value Range: min={video_tensor.min():.2f}, max={video_tensor.max():.2f} (should be approx. [-1, 1])")
+        
+        # Assertions to confirm the shape is correct for the model VAE
+        assert len(video_tensor.shape) == 5, f"Video tensor should have 5 dimensions, but got {len(video_tensor.shape)}"
+        assert video_tensor.shape[0] == BATCH_SIZE, f"Video batch size is incorrect, expected {BATCH_SIZE}"
+        assert video_tensor.shape[1] == 3, "Video should have 3 channels (RGB)"
+        print("    - Shape is valid for VAE input.")
+
+        print(f"\n  - Audio Tensor:")
+        print(f"    - Shape: {audio_tensor.shape}")
+        print(f"    - Dtype: {audio_tensor.dtype}")
+        
+        # Assertions to confirm the shape is correct
+        assert len(audio_tensor.shape) == 2, f"Audio tensor should have 2 dimensions, but got {len(audio_tensor.shape)}"
+        assert audio_tensor.shape[0] == BATCH_SIZE, f"Audio batch size is incorrect, expected {BATCH_SIZE}"
+        print("    - Shape is valid for VAE input.")
+
+        print("\n\033[92m✓ Batch shapes and dtypes are correct and match the requirements for the Ovi model.\033[0m")
+
+
+    except StopIteration:
+        print("✗ DataLoader is empty. This might happen if the CSV is empty or cannot be read.")
+    except Exception as e:
+        print(f"✗ An error occurred while fetching or inspecting the batch: {e}")
+        import traceback
+        traceback.print_exc()
+
+    print("\n" + "=" * 60)
+    print("Test completed.")
+    print("=" * 60)

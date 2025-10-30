@@ -41,6 +41,8 @@ def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_stra
             size_based_auto_wrap_policy,
             min_num_params=min_num_params
         )
+    elif wrap_strategy == "none":   # NOTE: change made on Oct 27, 2025
+        auto_wrap_policy = None
     else:
         raise ValueError(f"Invalid wrap strategy: {wrap_strategy}")
 
@@ -61,6 +63,7 @@ def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_stra
         device_id=torch.cuda.current_device(),
         limit_all_gathers=True,
         use_orig_params=True,
+        # use_orig_params=False,  # NOTE: change made on Oct 27, 2025
         ignored_modules=ignored_modules,
         cpu_offload=CPUOffload(offload_params=cpu_offload),
         sync_module_states=False  # Load ckpt on rank 0 and sync to other ranks
@@ -124,3 +127,11 @@ class EMA_FSDP:
             for n, p in fsdp_module.module.named_parameters():
                 if n in self.shadow:
                     p.data.copy_(self.shadow[n].to(p.dtype, device=p.device))
+
+def get_fsdp_trainable_params_count(model):
+    total = 0
+    with FSDP.summon_full_params(model, writeback=False, recurse=True):
+        for p in model.parameters():
+            if p.requires_grad:
+                total += p.numel()
+    return total

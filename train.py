@@ -4,14 +4,18 @@ from omegaconf import OmegaConf
 import wandb
 
 from trainer import DiffusionTrainer, GANTrainer, ODETrainer, ScoreDistillationTrainer, Wan22ScoreDistillationTrainer, OviScoreDistillationTrainer
-
+import logging, os
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(filename)s] %(levelname)s: %(message)s"
+)
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", type=str, required=True)
     parser.add_argument("--no_save", action="store_true")
     parser.add_argument("--no_visualize", action="store_true")
-    parser.add_argument("--logdir", type=str, default="/videogen/Wan2.2-TI2V-5B-Turbo/logs/distill_anysize", help="Path to the directory to save logs")
+    parser.add_argument("--logdir", type=str, default="/videogen/Wan2.2-TI2V-5B-Turbo/logs/distill_ovi", help="Path to the directory to save logs")
     parser.add_argument("--wandb-save-dir", type=str, default="/videogen/Wan2.2-TI2V-5B-Turbo", help="Path to the directory to save wandb logs")
     parser.add_argument("--disable-wandb", default=False, action="store_true", help="Disable wandb logging")
     parser.add_argument("--data_path", type=str, default=None, help="Path to the dataset")

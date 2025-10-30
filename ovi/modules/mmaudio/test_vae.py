@@ -26,7 +26,7 @@ def main():
     torch.manual_seed(42)
     
     # Load configuration
-    config_path = "/home/weiminwang/audio/veo3/multimodal-generation/models/wan/modules/mmaudio/test_vae_config.yaml"
+    config_path = "/videogen/Wan2.2-TI2V-5B-Turbo/ovi/modules/mmaudio/test_vae_config.yaml"
     if not os.path.exists(config_path):
         print(f"Config file {config_path} not found!")
         return

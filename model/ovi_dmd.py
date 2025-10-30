@@ -2,10 +2,12 @@ import torch
 import torch.nn.functional as F
 from typing import Optional, Tuple, Union
 
-from model.base import SelfForcingModel
+from model.ovi_base import OviSelfForcingModel
 from utils.dataset import masks_like
+import logging
+logger = logging.getLogger(__name__)
 
-class OviDMD(SelfForcingModel):
+class OviDMD(OviSelfForcingModel):
     def __init__(self, args, device):
         """
         Initialize the OviDMD (Distribution Matching Distillation) module for Audio-Video models.
@@ -64,49 +66,42 @@ class OviDMD(SelfForcingModel):
             mask2 = torch.stack(mask2, dim=0)
             noisy_video = (1. - mask2) * wan22_image_latent + mask2 * noisy_video
             noisy_video = noisy_video.to(self.device, dtype=self.dtype)
-
-            # Create special timestep format for Wan2.2's video transformer
-            wan22_input_timestep = torch.tensor([timestep[0][0].item()], device=self.device, dtype=torch.long)
-            temp_ts = (mask2[:, :, 0, ::2, ::2] * wan22_input_timestep)
-            temp_ts = temp_ts.reshape(temp_ts.shape[0], -1)
-            temp_ts = torch.cat([temp_ts, temp_ts.new_ones(temp_ts.shape[0], self.generator.seq_len - temp_ts.size(1)) * wan22_input_timestep], dim=1)
-            wan22_input_timestep = temp_ts.to(self.device, dtype=torch.long)
+            first_frame_is_clean = True
         else:
             mask2 = None
-            wan22_input_timestep = None
-
-        # Re-package noisy latents after video-specific processing
-        current_noisy_latents = (noisy_video, noisy_audio)
+            first_frame_is_clean = False
 
         # --- Step 1: Compute the Fake Score (from Critic) for both branches ---
-        _, (pred_fake_video_cond, pred_fake_audio_cond) = self.fake_score(
-            noisy_latents=current_noisy_latents,
+        pred_fake_video_cond, pred_fake_audio_cond = self.fake_score(
+            video_latent=noisy_video,
+            audio_latent=noisy_audio,
             conditional_dict=conditional_dict,
             timestep=timestep,
-            wan22_input_timestep=wan22_input_timestep,
             mask2=mask2,
             wan22_image_latent=wan22_image_latent,
+            first_frame_is_clean=first_frame_is_clean,
         )
         pred_fake_video = pred_fake_video_cond
         pred_fake_audio = pred_fake_audio_cond
-        # Note: CFG for fake_score is disabled (guidance_scale=0.0)
 
         # --- Step 2: Compute the Real Score (from Teacher) for both branches ---
-        _, (pred_real_video_cond, pred_real_audio_cond) = self.real_score(
-            noisy_latents=current_noisy_latents,
+        pred_real_video_cond, pred_real_audio_cond = self.real_score(
+            video_latent=noisy_video,
+            audio_latent=noisy_audio,
             conditional_dict=conditional_dict,
             timestep=timestep,
-            wan22_input_timestep=wan22_input_timestep,
             mask2=mask2,
             wan22_image_latent=wan22_image_latent,
+            first_frame_is_clean=first_frame_is_clean,
         )
-        _, (pred_real_video_uncond, pred_real_audio_uncond) = self.real_score(
-            noisy_latents=current_noisy_latents,
+        pred_real_video_uncond, pred_real_audio_uncond = self.real_score(
+            video_latent=noisy_video,
+            audio_latent=noisy_audio,
             conditional_dict=unconditional_dict,
             timestep=timestep,
-            wan22_input_timestep=wan22_input_timestep,
             mask2=mask2,
             wan22_image_latent=wan22_image_latent,
+            first_frame_is_clean=first_frame_is_clean,
         )
 
         # Apply CFG for the teacher model
@@ -284,34 +279,41 @@ class OviDMD(SelfForcingModel):
             mask2 = torch.stack(mask2, dim=0)
             noisy_generated_video = (1. - mask2) * wan22_image_latent + mask2 * noisy_generated_video
             noisy_generated_video = noisy_generated_video.to(self.device, dtype=self.dtype)
-
-            wan22_input_timestep = torch.tensor([critic_timestep[0][0].item()], device=self.device, dtype=torch.long)
-            temp_ts = (mask2[:, :, 0, ::2, ::2] * wan22_input_timestep)
-            temp_ts = temp_ts.reshape(temp_ts.shape[0], -1)
-            temp_ts = torch.cat([temp_ts, temp_ts.new_ones(temp_ts.shape[0], self.generator.seq_len - temp_ts.size(1)) * wan22_input_timestep], dim=1)
-            wan22_input_timestep = temp_ts.to(self.device, dtype=torch.long)
+            first_frame_is_clean = True
         else:
             mask2 = None
-            wan22_input_timestep = None
+            first_frame_is_clean = False
         
         # Step 4: Get predictions from the critic (fake_score)
-        _, (pred_fake_video, pred_fake_audio) = self.fake_score(
-            noisy_latents=(noisy_generated_video, noisy_generated_audio),
+        pred_fake_video, pred_fake_audio = self.fake_score(
+            video_latent=noisy_generated_video,
+            audio_latent=noisy_generated_audio,
             conditional_dict=conditional_dict,
             timestep=critic_timestep,
-            wan22_input_timestep=wan22_input_timestep,
             mask2=mask2,
             wan22_image_latent=wan22_image_latent,
         )
 
         # Step 5: Compute the denoising loss for the critic on both branches
+        # generated_video, pred_fake_video, critic_noise_video: shape [B, F, C, H, W]
+        # generated_audio, pred_fake_audio, critic_noise_audio: shape [B, L, D]
+        # critic_timestep shape: [B, F]
+        # audio_timestep_flat shape: [B*L], (already flattened)
+
+        # logger.info(f"generated_video shape: {generated_video.shape}, pred_fake_video shape: {pred_fake_video.shape}, critic_noise_video shape: {critic_noise_video.shape}")
+        # logger.info(f"generated_audio shape: {generated_audio.shape}, pred_fake_audio shape: {pred_fake_audio.shape}, critic_noise_audio shape: {critic_noise_audio.shape}")
+        # logger.info
+        # logger.info(f"critic_timestep shape: {critic_timestep.shape}, audio_timestep_flat shape: {audio_timestep_flat.shape}")
+
         # --- Video Critic Loss ---
         denoising_loss_video = self.denoising_loss_func(
             x=generated_video.flatten(0, 1),
             x_pred=pred_fake_video.flatten(0, 1),
             noise=critic_noise_video.flatten(0, 1),
-            # Other params like noise_pred/flow_pred depend on your loss type
+            # parameters not used
+            noise_pred = None,
             timestep=critic_timestep.flatten(0, 1),
+            alphas_cumprod=self.scheduler.alphas_cumprod
         )
         
         # --- Audio Critic Loss ---
@@ -319,7 +321,10 @@ class OviDMD(SelfForcingModel):
             x=generated_audio.flatten(0, 1),
             x_pred=pred_fake_audio.flatten(0, 1),
             noise=critic_noise_audio.flatten(0, 1),
+            # parameters not used
+            noise_pred = None, 
             timestep=audio_timestep_flat,
+            alphas_cumprod=self.scheduler.alphas_cumprod
         )
 
         # --- Combine Losses ---

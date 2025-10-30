@@ -25,7 +25,7 @@ class OviBidirectionalTrainingPipeline(torch.nn.Module):
     def generate_and_sync_list(self, num_denoising_steps, device):
         rank = dist.get_rank() if dist.is_initialized() else 0
         if rank == 0:
-            indices = torch.randint(low=0, high=num_denoising_steps, size=(1,), device=device)
+            indices = torch.randint(low=0, high=num_denoising_steps, size=(1,), device=device)  # a randint index between 0 and 3, shape (1,)
         else:
             indices = torch.empty(1, dtype=torch.long, device=device)
         dist.broadcast(indices, src=0)
@@ -42,89 +42,66 @@ class OviBidirectionalTrainingPipeline(torch.nn.Module):
         The entire data flow now handles tuples for both modalities.
         """
         video_noise, audio_noise = noises
-        num_denoising_steps = len(self.denoising_step_list)
-        exit_flags = self.generate_and_sync_list(num_denoising_steps, device=device)    # Random exit step is shared between both branches
-        device = video_noise.device
-        dtype = video_noise.dtype
+        device = video_noise.device     
+        dtype = video_noise.dtype       # torch.bfloat16 if args.mixed_precision
+        # video_noise shape: (B, F, C, H, W) = (B, 31, 48, H_real//16, W_real//16)
+        # audio_noise shape: (B, L, D) = (B, 157, 20)
+
+        num_denoising_steps = len(self.denoising_step_list) # here equals 4
+        exit_flags = self.generate_and_sync_list(num_denoising_steps, device=device)    # Random exit step is shared between both branches, exit at 0-3
         
         # Initial point is a tuple of noisy latents
         noisy_latents = (video_noise, audio_noise)
         # Denoising loop
         for index, current_timestep in enumerate(self.denoising_step_list):
             exit_flag = (index == exit_flags[0])
-            
             noisy_video, noisy_audio = noisy_latents
-            
-            # Timestep is primarily shaped for video [B, F]
-            timestep = torch.ones(noisy_video.shape[:2], device=device, dtype=torch.int64) * current_timestep
+            # timestep = torch.ones(noisy_video.shape[:2], device=device, dtype=torch.int64) * current_timestep   # shape: (B, F)
+            timestep = torch.ones(noisy_video.shape[0], device=device, dtype=torch.long) * current_timestep   # shape: (B,)
 
-            # --- Wan2.2 video-specific processing ---
-            # This part ONLY applies to the video latent.
             if "Ovi" in self.generator.model_name and wan22_image_latent is not None:
-                mask1, mask2 = masks_like(noisy_video, zero=True)
+                mask1, mask2 = masks_like(noisy_video, zero=True)       # shape of mask2: (B, F, C, H, W)
                 mask2 = torch.stack(mask2, dim=0)
                 noisy_video = (1. - mask2) * wan22_image_latent + mask2 * noisy_video
                 noisy_video = noisy_video.to(device, dtype=dtype)
-
-                # Construct special timestep format for the video model
-                wan22_input_timestep = torch.tensor([timestep[0][0].item()], device=device, dtype=torch.long)
-                temp_ts = (mask2[:, :, 0, ::2, ::2] * wan22_input_timestep.float())
-                temp_ts = temp_ts.reshape(temp_ts.shape[0], -1)
-                temp_ts = torch.cat([temp_ts, temp_ts.new_ones(temp_ts.shape[0], self.generator.seq_len - temp_ts.size(1)) * wan22_input_timestep.float()], dim=1)
-                wan22_input_timestep = temp_ts.to(device, dtype=torch.long)
+                first_frame_is_clean = True
             else:
                 mask2 = None
-                wan22_input_timestep = None
-            
-            # Re-package latents after video-specific modifications
-            current_noisy_latents = (noisy_video, noisy_audio)
+                first_frame_is_clean = False
 
             # Call the generator (OviDiffusionWrapper)
             if not exit_flag:
                 with torch.no_grad():
-                    # Generator returns a tuple of predictions
-                    _, denoised_preds = self.generator(
-                        noisy_latents=current_noisy_latents,
+                    pred_video, pred_audio = self.generator(
+                        video_latent=noisy_video,   # shape: (B, F, C, H, W)
+                        audio_latent=noisy_audio,   # shape: (B, L, D)
                         conditional_dict=conditional_dict,
                         timestep=timestep,
-                        wan22_input_timestep=wan22_input_timestep,
                         mask2=mask2,
                         wan22_image_latent=wan22_image_latent,
+                        first_frame_is_clean=first_frame_is_clean,
                     )
-                    pred_video, pred_audio = denoised_preds
-
-                    # Add noise to the next timestep for both branches
+                    # Add noise for the next step (logic remains the same, but inputs might be different)
                     next_timestep_val = self.denoising_step_list[index + 1]
+                    next_ts = torch.full((pred_video.shape[0],), next_timestep_val, dtype=torch.long, device=device)
                     
-                    # --- Video Branch Noise Addition ---
-                    next_timestep_video = next_timestep_val * torch.ones(pred_video.shape[:2], dtype=torch.long, device=device)
-                    next_noisy_video = self.scheduler.add_noise(
-                        pred_video.flatten(0, 1),
-                        torch.randn_like(pred_video.flatten(0, 1)),
-                        next_timestep_video.flatten(0, 1)
-                    ).unflatten(0, pred_video.shape[:2])
-                    
-                    # --- Audio Branch Noise Addition ---
-                    next_timestep_audio_flat = next_timestep_val * torch.ones(pred_audio.numel() // pred_audio.shape[-1], dtype=torch.long, device=device)
-                    next_noisy_audio = self.scheduler.add_noise(
-                        pred_audio.flatten(0, 1),
-                        torch.randn_like(pred_audio.flatten(0, 1)),
-                        next_timestep_audio_flat
-                    ).unflatten(0, pred_audio.shape[:2])
-
+                    next_noisy_video = self.scheduler.add_noise(pred_video, torch.randn_like(pred_video), next_ts)
+                    next_noisy_audio = self.scheduler.add_noise(pred_audio, torch.randn_like(pred_audio), next_ts)
                     noisy_latents = (next_noisy_video, next_noisy_audio)
             else:
                 # This is the exit step, compute with gradients
-                _, denoised_preds = self.generator(
-                    noisy_latents=current_noisy_latents,
+                pred_video, pred_audio = self.generator(
+                    video_latent=noisy_video,
+                    audio_latent=noisy_audio,
                     conditional_dict=conditional_dict,
                     timestep=timestep,
-                    wan22_input_timestep=wan22_input_timestep,
                     mask2=mask2,
                     wan22_image_latent=wan22_image_latent,
+                    first_frame_is_clean=first_frame_is_clean,
                 )
+                denoised_preds = (pred_video, pred_audio)
                 break
-        
+
         # This part calculates the timestep range for logging/scheduling, remains the same.
         if exit_flags[0] == len(self.denoising_step_list) - 1:
             denoised_timestep_to = 0

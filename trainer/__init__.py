@@ -9,5 +9,6 @@ __all__ = [
     "GANTrainer",
     "ODETrainer",
     "ScoreDistillationTrainer",
-    "Wan22ScoreDistillationTrainer"
+    "Wan22ScoreDistillationTrainer",
+    "OviScoreDistillationTrainer",
 ]

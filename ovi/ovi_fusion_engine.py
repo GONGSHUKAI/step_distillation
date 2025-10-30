@@ -225,7 +225,7 @@ class OviFusionEngine:
                 self.model = self.model.to(self.device)
             with torch.amp.autocast('cuda', enabled=self.target_dtype != torch.float32, dtype=self.target_dtype):
                 for i, (t_v, t_a) in tqdm(enumerate(zip(timesteps_video, timesteps_audio))):
-                    timestep_input = torch.full((1,), t_v, device=self.device)
+                    timestep_input = torch.full((1,), t_v, device=self.device)  # shape: (1,)
 
                     if is_i2v:
                         video_noise[:, :1] = latents_images

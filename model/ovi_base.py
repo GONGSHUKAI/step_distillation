@@ -15,7 +15,6 @@ class OviBaseModel(nn.Module):
     def __init__(self, args, device):
         super().__init__()
         self.is_causal = False
-        self.i2v = args.i2v
         self._initialize_models(args, device)
 
         self.device = device
@@ -24,7 +23,6 @@ class OviBaseModel(nn.Module):
         if hasattr(args, "denoising_step_list"):
             self.denoising_step_list = torch.tensor(args.denoising_step_list, dtype=torch.long)
             if args.warp_denoising_step:
-                # Scheduler is shared, so we can get it from the generator
                 timesteps = torch.cat((self.generator.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32)))
                 self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
 
@@ -46,7 +44,7 @@ class OviBaseModel(nn.Module):
         self.fake_score = OviFusionWrapper(model_name=self.fake_model_name, is_causal=False)
         self.fake_score.model.requires_grad_(True)
 
-        self.text_encoder = OviTextEncoder(model_name=self.generator_name)
+        self.text_encoder = OviTextEncoder()
         self.text_encoder.requires_grad_(False)
         
         # Ovi has a unified VAE wrapper for both video and audio
@@ -97,6 +95,10 @@ class OviSelfForcingModel(OviBaseModel):
         """
         MODIFIED FOR OVI: Handles both video and audio branches.
         Generates latents for both modalities using backward simulation.
+        Inputs:
+            - latent_shapes: A tuple of two lists, each specifying the shape of video and audio latents. [B, F, C, H, W] for video and [B, L] for audio.
+            - conditional_dict: a dictionary containing the conditional information (e.g. text embeddings, image embeddings).
+            - wan22_image_latent: a tensor with shape [B, 1, C, H, W] or None, used for Wan2.2 video part only.
         """
         video_shape, audio_shape = latent_shapes
         # Step 1: Sample noise and backward simulate the generator's input
@@ -135,29 +137,29 @@ class OviSelfForcingModel(OviBaseModel):
         )
         pred_video, pred_audio = pred_latents
 
-        # --- Post-processing (applies ONLY to video) ---
-        # The logic for re-encoding the first frame for long videos is kept.
-        if pred_video.shape[1] > latent_frames_num: # i.e., num_generated_frames > 31, which will not happen here
-            with torch.no_grad():
-                latent_to_decode = pred_video[:, :-(latent_frames_num-1), ...]
-                pixels = self.vae.video_vae.decode_to_pixel(latent_to_decode) # Use the video part of the VAE
-                frame = pixels[:, -1:, ...].to(self.dtype)
-                frame = rearrange(frame, "b t c h w -> b c t h w")
-                image_latent = self.vae.video_vae.encode_to_latent(frame).to(self.dtype)
+        # # --- Post-processing (applies ONLY to video) ---
+        # # The logic for re-encoding the first frame for long videos is kept.
+        # if pred_video.shape[1] > latent_frames_num: # i.e., num_generated_frames > 31, which will not happen here
+        #     with torch.no_grad():
+        #         latent_to_decode = pred_video[:, :-(latent_frames_num-1), ...]
+        #         pixels = self.vae.decode_video(latent_to_decode) # Use the video part of the VAE
+        #         frame = pixels[:, -1:, ...].to(self.dtype)
+        #         frame = rearrange(frame, "b t c h w -> b c t h w")
+        #         image_latent = self.vae.video_vae.encode_to_latent(frame).to(self.dtype)
             
-            pred_video_last_clip = torch.cat([image_latent, pred_video[:, -(latent_frames_num-1):, ...]], dim=1)
-        else:
-            pred_video_last_clip = pred_video
+        #     pred_video_last_clip = torch.cat([image_latent, pred_video[:, -(latent_frames_num-1):, ...]], dim=1)
+        # else:
+        #     pred_video_last_clip = pred_video
 
-        # --- Gradient Mask (applies ONLY to video) ---
-        if num_generated_frames != min_num_frames:  # 31 != 31, which will not happen here
-            gradient_mask = torch.ones_like(pred_video_last_clip, dtype=torch.bool)
-            # Do not compute loss on the context frames (first block)
-            gradient_mask[:, :self.num_frame_per_block] = False
-        else:
-            gradient_mask = None
-
-        final_pred_latents = (pred_video_last_clip.to(self.dtype), pred_audio.to(self.dtype))
+        # # --- Gradient Mask (applies ONLY to video) ---
+        # if num_generated_frames != min_num_frames:  # 31 != 31, which will not happen here
+        #     gradient_mask = torch.ones_like(pred_video_last_clip, dtype=torch.bool)
+        #     # Do not compute loss on the context frames (first block)
+        #     gradient_mask[:, :self.num_frame_per_block] = False
+        # else:
+        #     gradient_mask = None
+        gradient_mask = None
+        final_pred_latents = (pred_video.to(self.dtype), pred_audio.to(self.dtype))
         
         return final_pred_latents, gradient_mask, denoised_timestep_from, denoised_timestep_to
 

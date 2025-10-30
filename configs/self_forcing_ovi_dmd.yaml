@@ -1,31 +1,50 @@
-generator_fsdp_wrap_strategy: size
-real_score_fsdp_wrap_strategy: size
-fake_score_fsdp_wrap_strategy: size
-real_name: Ovi                  # 教师模型（teacher）
-fake_name: Ovi                  # 判别器模型（critic）
-generator_type: bidirectional   # 使用双向扩散模型
-generator_name: Ovi             # 学生模型（student）
+# FSDP related settings
+generator_fsdp_wrap_strategy: none
+real_score_fsdp_wrap_strategy: none
+fake_score_fsdp_wrap_strategy: none
 text_encoder_fsdp_wrap_strategy: size
-image_encoder_fsdp_wrap_strategy: size
-text_encoder_cpu_offload: true
-denoising_step_list:  # 蒸馏的时间步
-- 1000
-- 750
-- 500
-- 250
-warp_denoising_step: true # need to remove - 0 in denoising_step_list if warp_denoising_step is true, 将离散步数映射到连续时间步
-ts_schedule: false
+sharding_strategy: full
+
+# Logging
+wandb_host: https://api.wandb.ai
+wandb_key: afa4e78959b05201e369f448504697737237fc5c
+wandb_entity: shukai_gong
+wandb_project: Ovi-distill
+
+# Model settings
+real_name: Ovi                  # teacher model, frozen
+fake_name: Ovi                  # critic model, trainable
+generator_name: Ovi             # student model, trainable
+generator_type: bidirectional   # bidirectional diffusion, not causal diffusion
+
+## Distillation settings
+distribution_loss: dmd            
+trainer: score_distillation_ovi   
+num_frame_per_block: 31
+num_training_frames: 31
+load_raw_video: false
+model_kwargs:
+  timestep_shift: 5.0
+initial_step: 0
+dfake_gen_update_ratio: 5
+
+## Diffusion settings
+denoising_step_list: [1000, 750, 500, 250]
 num_train_timestep: 1000
 timestep_shift: 5.0
 guidance_scale: 6.0
 denoising_loss_type: x0
+negative_prompt: '色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走'
+video_negative_prompt: "jitter, bad hands, blur, distortion"  # Artifacts to avoid in video
+audio_negative_prompt: "robotic, muffled, echo, distorted"    # Artifacts to avoid in audio
+
+## Training settings
+text_encoder_cpu_offload: true
+warp_denoising_step: true # need to remove - 0 in denoising_step_list if warp_denoising_step is true, 将离散步数映射到连续时间步
+ts_schedule: false
+gradient_checkpointing: true
 mixed_precision: true
 seed: 0
-wandb_host: https://api.wandb.ai
-wandb_key: afa4e78959b05201e369f448504697737237fc5c
-wandb_entity: shukai_gong
-wandb_project: wan2.2-distill
-sharding_strategy: full
 lr: 5.0e-07
 lr_critic: 1.0e-07
 beta1: 0.0
@@ -37,23 +56,12 @@ ema_weight: 0.99
 ema_start_step: 200
 total_batch_size: 64
 log_iters: 500
-negative_prompt: '色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走'
-dfake_gen_update_ratio: 5
-video_latent_shape: [1, 31, 48, 44, 80]
+video_latent_shape: [1, 31, 48, 44, 80]   # in TI2AV settings, H, W depends on ref image size
 audio_latent_shape: [1, 157, 20]
 
+## Dataset settings
 num_frames: 121
 h: 704
 w: 1280
 audio_sample_rate: 16000
 audio_duration_secs: 5
-
-distribution_loss: dmd              # 使用 DMD 损失
-trainer: score_distillation_ovi   # 使用 Wan2.2 专用的分数蒸馏训练器
-gradient_checkpointing: true
-num_frame_per_block: 31
-num_training_frames: 31
-load_raw_video: false
-model_kwargs:
-  timestep_shift: 5.0
-initial_step: 0

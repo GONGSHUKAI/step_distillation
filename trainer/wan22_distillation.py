@@ -16,7 +16,7 @@ import time
 import os
 import logging
 
-logger = logging.getLogger()
+logger = logging.getLogger(__name__)
 
 class Trainer:
     def __init__(self, config):
@@ -30,13 +30,13 @@ class Trainer:
         launch_distributed_job()
         global_rank = dist.get_rank()
         self.world_size = dist.get_world_size()
-        print("Setting up the distributed environment...") if dist.get_rank() == 0 else None
+        self.is_main_process = global_rank == 0
+        logger.info("Setting up the distributed environment...") if self.is_main_process else None
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
         self.device = torch.cuda.current_device()
-        self.is_main_process = global_rank == 0
         self.causal = config.causal
         self.disable_wandb = config.disable_wandb
-        print(f"Using wandb: {not self.disable_wandb}") if dist.get_rank() == 0 else None
+        logger.info(f"Using wandb: {not self.disable_wandb}") if self.is_main_process else None
 
         # use a random seed for the training
         if config.seed == 0:
@@ -58,10 +58,11 @@ class Trainer:
             )
 
         self.output_path = config.logdir
-        print(f"Finished setting up the distributed environment.") if dist.get_rank() == 0 else None
+        self.debug_distributed_training()
+        logger.info(f"Finished setting up the distributed environment, world size: {self.world_size}") if self.is_main_process else None
 
         # Step 2: Initialize the model and optimizer
-        print("Initializing the distillation model...") if dist.get_rank() == 0 else None
+        logger.info(f"Initializing the {config.distribution_loss} distillation model...") if self.is_main_process else None
         if config.distribution_loss == "causvid":
             self.model = CausVid(config, device=self.device)
         elif config.distribution_loss == "dmd":
@@ -70,13 +71,12 @@ class Trainer:
             self.model = SiD(config, device=self.device)
         else:
             raise ValueError("Invalid distribution matching loss")
-        print(f"Initialized distillation model: {config.distribution_loss}") if dist.get_rank() == 0 else None
+        logger.info(f"Finished initializing the distillation model.") if self.is_main_process else None
 
         # Resume Training from Latest Checkpoint
         pretrained_ckpt_path, self.step = self.load(self.output_path)
         if pretrained_ckpt_path is not None:
-            if self.is_main_process:
-                print(f"Loading checkpoint from {pretrained_ckpt_path} at step {self.step}")
+            logger.info(f"Loading checkpoint from {pretrained_ckpt_path} at step {self.step}") if self.is_main_process else None
             state_dict = torch.load(pretrained_ckpt_path, map_location="cpu")
             self.model.generator.load_state_dict(state_dict["generator"], strict=True)
             self.model.fake_score.load_state_dict(state_dict["critic"], strict=True)
@@ -84,28 +84,44 @@ class Trainer:
         # Save pretrained model state_dicts to CPU
         self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
 
-        print("Wrapping model components with FSDP...") if dist.get_rank() == 0 else None
+        logger.info("Wrapping model components with FSDP...") if self.is_main_process else None
+        logger.info(f"Before FSDP, model architecture: {self.model.generator}") if self.is_main_process else None
+        orig_student = sum(p.numel() for p in self.model.generator.parameters() if p.requires_grad)
+        logger.info(f"Before FSDP, student parameters: {orig_student/1e9:.2f}B") if self.is_main_process else None
         self.model.generator = fsdp_wrap(
             self.model.generator,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
             wrap_strategy=config.generator_fsdp_wrap_strategy
         )
+        logger.info(f"After FSDP, model architecture: {self.model.generator}") if self.is_main_process else None
+        fsdp_student = sum(p.numel() for p in self.model.generator.parameters() if p.requires_grad)
+        logger.info(f"After FSDP, generator parameters: {fsdp_student/1e9:.2f}B") if self.is_main_process else None
 
+        orig_teacher = sum(p.numel() for p in self.model.real_score.parameters() if p.requires_grad)
+        logger.info(f"Before FSDP, teacher parameters: {orig_teacher/1e9:.2f}B") if self.is_main_process else None
         self.model.real_score = fsdp_wrap(
             self.model.real_score,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
             wrap_strategy=config.real_score_fsdp_wrap_strategy
         )
+        fsdp_teacher = sum(p.numel() for p in self.model.real_score.parameters() if p.requires_grad)
+        logger.info(f"After FSDP, teacher parameters: {fsdp_teacher/1e9:.2f}B") if self.is_main_process else None
 
+        orig_critic = sum(p.numel() for p in self.model.fake_score.parameters() if p.requires_grad)
+        logger.info(f"Before FSDP, critic parameters: {orig_critic/1e9:.2f}B") if self.is_main_process else None
         self.model.fake_score = fsdp_wrap(
             self.model.fake_score,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
             wrap_strategy=config.fake_score_fsdp_wrap_strategy
         )
+        fsdp_critic = sum(p.numel() for p in self.model.fake_score.parameters() if p.requires_grad)
+        logger.info(f"After FSDP, critic parameters: {fsdp_critic/1e9:.2f}B") if self.is_main_process else None
 
+        orig_text = sum(p.numel() for p in self.model.text_encoder.parameters() if p.requires_grad)
+        logger.info(f"Before FSDP, text encoder parameters: {orig_text/1e9:.2f}B") if self.is_main_process else None
         self.model.text_encoder = fsdp_wrap(
             self.model.text_encoder,
             sharding_strategy=config.sharding_strategy,
@@ -113,11 +129,17 @@ class Trainer:
             wrap_strategy=config.text_encoder_fsdp_wrap_strategy,
             cpu_offload=getattr(config, "text_encoder_cpu_offload", False)
         )
+        fsdp_text = sum(p.numel() for p in self.model.text_encoder.parameters() if p.requires_grad)
+        logger.info(f"After FSDP, text encoder parameters: {fsdp_text/1e9:.2f}B") if self.is_main_process else None
 
+        orig_vae = sum(p.numel() for p in self.model.vae.parameters() if p.requires_grad)
+        logger.info(f"VAE parameters: {orig_vae/1e9:.2f}B") if self.is_main_process else None
         self.model.vae = self.model.vae.to(
             device=self.device, dtype=torch.bfloat16 if config.mixed_precision else torch.float32)
-        print("Finished wrapping model components with FSDP.") if dist.get_rank() == 0 else None
-        print("Setting up optimizers...") if dist.get_rank() == 0 else None
+        logger.info("Finished wrapping model components with FSDP.") if self.is_main_process else None
+        logger.info(f"GPU memory after FSDP wrapping: {torch.cuda.memory_allocated(self.device)/1e9:.2f} GB") if self.is_main_process else None
+
+        logger.info("Setting up optimizers...") if self.is_main_process else None
         self.generator_optimizer = torch.optim.AdamW(
             [param for param in self.model.generator.parameters()
              if param.requires_grad],
@@ -133,10 +155,10 @@ class Trainer:
             betas=(config.beta1_critic, config.beta2_critic),
             weight_decay=config.weight_decay
         )
-        print("Finished setting up optimizers.") if dist.get_rank() == 0 else None
+        logger.info("Finished setting up optimizers.") if self.is_main_process else None
 
         # Step 3: Initialize the dataloader
-        print("Setting up dataset and dataloader...") if dist.get_rank() == 0 else None
+        logger.info("Setting up dataset and dataloader...") if self.is_main_process else None
         dataset = ODERegressionCSVDataset(
             config.data_path, 
             max_pair=int(1e8), 
@@ -161,11 +183,11 @@ class Trainer:
         if dist.get_rank() == 0:
             print("DATASET SIZE %d" % len(dataset))
         self.dataloader = cycle(dataloader)
-        print("Finished setting up dataset and dataloader.") if dist.get_rank() == 0 else None
+        logger.info(f"Finished setting up dataset and dataloader, dataset size: {len(dataset)}.") if self.is_main_process else None
 
         ##############################################################################################################
         # 6. Set up EMA parameter containers
-        print("Setting up EMA parameters...") if dist.get_rank() == 0 else None
+        logger.info("Setting up EMA parameters...") if self.is_main_process else None
         rename_param = (
             lambda name: name.replace("_fsdp_wrapped_module.", "")
             .replace("_checkpoint_wrapped_module.", "")
@@ -182,22 +204,22 @@ class Trainer:
         self.ema_start_step = config.get("ema_start_step", 0)
         self.generator_ema = None
         if (self.ema_weight > 0.0) and (self.step >= self.ema_start_step):
-            print(f"Setting up EMA with weight {self.ema_weight}") if dist.get_rank() == 0 else None
+            logger.info(f"Setting up EMA with weight {self.ema_weight}") if dist.get_rank() == 0 else None
             self.generator_ema = EMA_FSDP(self.model.generator, decay=self.ema_weight)
             
             # Load EMA state dict if available in checkpoint
             if pretrained_ckpt_path is not None:
                 checkpoint_state_dict = torch.load(pretrained_ckpt_path, map_location="cpu")
                 if "generator_ema" in checkpoint_state_dict:
-                    print("Loading generator_ema from checkpoint")
+                    logger.info("Loading generator_ema from checkpoint") if dist.get_rank() == 0 else None
                     self.generator_ema.load_state_dict(checkpoint_state_dict["generator_ema"])
                 else:
-                    print("No generator_ema found in checkpoint, starting fresh EMA")
-        print("Finished setting up EMA parameters.") if dist.get_rank() == 0 else None
+                    logger.info("No generator_ema found in checkpoint, starting fresh EMA")
+        logger.info("Finished setting up EMA parameters.") if self.is_main_process else None
         ##############################################################################################################
         # 7. (If resuming) Load the model and optimizer, lr_scheduler, ema's statedicts
         if getattr(config, "generator_ckpt", False):
-            print(f"Loading pretrained generator from {config.generator_ckpt}") if dist.get_rank() == 0 else None
+            logger.info(f"Loading pretrained generator from {config.generator_ckpt}") if dist.get_rank() == 0 else None
             state_dict = torch.load(config.generator_ckpt, map_location="cpu")
             if "generator" in state_dict:
                 state_dict = state_dict["generator"]
@@ -217,6 +239,22 @@ class Trainer:
         self.max_grad_norm_critic = getattr(config, "max_grad_norm_critic", 10.0)
         self.previous_time = None
 
+    def debug_distributed_training(self):
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        hostname = os.uname()[1] 
+
+        logger.info(
+            f"[DIAGNOSTIC] Hostname: {hostname}, "
+            f"Global Rank: {rank}, "
+            f"World Size: {world_size}, "
+            f"Master Addr: {os.environ.get('MASTER_ADDR')}, "
+            f"Node Rank: {os.environ.get('NODE_RANK')}"
+        )
+        
+        if dist.is_initialized():
+            dist.barrier()
+            
     def load(self, out_path):
         # 1. Find latest checkpoint folder (ranked by step)
         if not os.path.exists(out_path):

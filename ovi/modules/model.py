@@ -12,7 +12,8 @@ from .attention import flash_attention
 from torch.utils.checkpoint import checkpoint
 from ovi.distributed_comms.communications import all_gather, all_to_all_4D
 from ovi.distributed_comms.parallel_states import nccl_info, get_sequence_parallel_state
-
+import logging
+logger = logging.getLogger(__name__)
 
 def gradient_checkpointing(module: nn.Module, *args, enabled: bool, **kwargs):
     if enabled:
@@ -702,7 +703,8 @@ class WanModel(ModelMixin, ConfigMixin):
 
         # params
         ## need to change!
-        device = next(self.patch_embedding.parameters()).device
+        # device = next(self.patch_embedding.parameters()).device
+        device = self.patch_embedding.weight.device if hasattr(self.patch_embedding, 'weight') else next(self.patch_embedding.parameters()).device
 
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
@@ -711,6 +713,10 @@ class WanModel(ModelMixin, ConfigMixin):
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
         # embeddings
+        # logger.info(f"class of x: {type(x)}, len: {len(x)}, shape of first element: {x[0].shape}")
+        # logger.info(f"patch embedding weight size: {self.patch_embedding.weight.shape if hasattr(self.patch_embedding, 'weight') else 'N/A'}")
+        # logger.info(f"u.unsqueeze(0) shape: {x[0].unsqueeze(0).shape}")
+        # logger.info(f"shape of computed result: {self.patch_embedding(x[0].unsqueeze(0)).shape}")
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x] ## x is list of [B L D] or [B C F H W]
         if self.is_audio_type:
             # [B, 1]
@@ -739,7 +745,7 @@ class WanModel(ModelMixin, ConfigMixin):
                     t[i, :_first_images_seq_len[i]] = 0
                 # print(f"zeroing out first {_first_images_seq_len} from t: {t.shape}, {t}")
             else:
-                t = t.unsqueeze(1).expand(t.size(0), seq_len)
+                t = t.unsqueeze(1).expand(t.size(0), seq_len)       # [B, L]
         with amp.autocast('cuda', dtype=torch.bfloat16):
             bt = t.size(0)
             t = t.flatten()
