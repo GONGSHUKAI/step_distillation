@@ -7,6 +7,17 @@ from torch.distributed.fsdp import FullStateDictConfig, FullyShardedDataParallel
 from torch.distributed.fsdp.api import CPUOffload
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
 
+def ovi_wrap_policy(module, recurse, **kwargs):
+    from ovi.modules.ovi import FusionAttentionBlock
+    from peft.tuners.lora.layer import LoraLayer
+    av_modules_to_wrap = (FusionAttentionBlock, LoraLayer)
+    if recurse:
+        return True
+    if hasattr(module, "layer_name") and module.layer_name.endswith(".base_layer") and isinstance(module, torch.nn.Linear):
+        return True
+    if hasattr(module, "layer_name") and module.layer_name.endswith(".modules_to_save.default"):
+        return True
+    return isinstance(module, av_modules_to_wrap)
 
 def fsdp_state_dict(model):
     fsdp_fullstate_save_policy = FullStateDictConfig(
@@ -41,6 +52,8 @@ def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_stra
             size_based_auto_wrap_policy,
             min_num_params=min_num_params
         )
+    elif wrap_strategy == "ovi":
+        auto_wrap_policy = ovi_wrap_policy
     elif wrap_strategy == "none":   # NOTE: change made on Oct 27, 2025
         auto_wrap_policy = None
     else:

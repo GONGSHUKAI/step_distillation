@@ -634,6 +634,7 @@ class WanModel(ModelMixin, ConfigMixin):
         self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
         self.use_sp = get_sequence_parallel_state() # seq parallel
         if self.use_sp:
+            logger.info(f"Using sequence parallelism in WanModel") if torch.distributed.get_rank() == 0 else None
             self.sp_size = nccl_info.sp_size
             self.sp_rank = nccl_info.rank_within_group
             assert self.num_heads % self.sp_size == 0, \
@@ -688,6 +689,7 @@ class WanModel(ModelMixin, ConfigMixin):
 
 
     def set_gradient_checkpointing(self, enable: bool):
+        logger.info(f"Setting gradient checkpointing to {enable}") if torch.distributed.get_rank() == 0 else None
         self.gradient_checkpointing = enable
 
     def prepare_transformer_block_kwargs(
@@ -704,7 +706,8 @@ class WanModel(ModelMixin, ConfigMixin):
         # params
         ## need to change!
         # device = next(self.patch_embedding.parameters()).device
-        device = self.patch_embedding.weight.device if hasattr(self.patch_embedding, 'weight') else next(self.patch_embedding.parameters()).device
+        # device = self.patch_embedding.weight.device if hasattr(self.patch_embedding, 'weight') else next(self.patch_embedding.parameters()).device
+        device = x[0].device
 
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)

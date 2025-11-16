@@ -7,7 +7,8 @@ import torch.distributed as dist
 from typing import List, Dict, Tuple, Optional, Union
 import logging
 
-from ovi.modules.fusion import FusionModel
+# from ovi.modules.fusion import FusionModel
+from ovi.modules.ovi import FusionModel
 from ovi.modules.t5 import umt5_xxl
 from wan22.modules.vae2_2 import _video_vae as _video_vae_2_2
 from ovi.modules.mmaudio.features_utils import FeaturesUtils
@@ -219,13 +220,18 @@ class OviFusionWrapper(torch.nn.Module):
         self.model = FusionModel(self.video_config, self.audio_config).to(dtype=torch.bfloat16, device=torch.device('cpu'))
         logger.info(f"Ovi FusionModel initialized, loading model weights...") if dist.get_rank() == 0 else None
 
-        state_dict = load_file(
-            f"/videogen/Ovi/ckpts/{self.model_name}/model.safetensors",
-            device='cpu'
+        original_state_dict = load_file(
+            f"/videogen/Ovi/ckpts/{self.model_name}/model.safetensors", device='cpu'
         )
+        remapped_state_dict = remap_ovi_state_dict_for_refactored(original_state_dict)
 
-        self.model.load_state_dict(state_dict)
-        logger.info(f"Ovi weights loaded.") if dist.get_rank() == 0 else None
+        missing_keys, unexpected_keys = self.model.load_state_dict(remapped_state_dict, strict=False)
+        if missing_keys: 
+            logger.warning(f"Ovi weights loading: Missing keys: {missing_keys}")
+        if unexpected_keys: 
+            logger.warning(f"Ovi weights loading: Unexpected keys: {unexpected_keys}")
+        
+        logger.info(f"Ovi weights loaded into refactored model.") if dist.get_rank() == 0 else None
         self.model.eval()
 
         self.scheduler = FlowMatchScheduler(
@@ -299,8 +305,8 @@ class OviFusionWrapper(torch.nn.Module):
         # 准备 FusionModel 的输入 (保持不变)
         num_frames, c, h, w = video_latent.shape[1:]        # video latent shape: (B, F, C, H, W)
         # ... (vid_seq_len, audio_seq_len 计算不变) ...
-        _patch_size_h = self.model.video_model.patch_size[1]
-        _patch_size_w = self.model.video_model.patch_size[2]
+        _patch_size_h = self.model.video_patch_size[1]
+        _patch_size_w = self.model.video_patch_size[2]
         vid_seq_len = num_frames * h * w // (_patch_size_h * _patch_size_w)
         audio_seq_len = audio_latent.shape[1]
         
@@ -354,6 +360,36 @@ class OviFusionWrapper(torch.nn.Module):
     
     def post_init(self):
         self.get_scheduler()
+
+def remap_ovi_state_dict_for_refactored(state_dict):
+    """
+    将预训练的 state_dict 键转换为新的扁平化 FusionModel 结构。
+    """
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k
+        # 规则 1: video_model.blocks.X.* -> fusion_blocks.X.vid_block.*
+        if k.startswith("video_model.blocks."):
+            parts = k.split('.')
+            block_idx = parts[2]
+            remaining_path = ".".join(parts[3:])
+            new_key = f"fusion_blocks.{block_idx}.vid_block.{remaining_path}"
+        # 规则 2: audio_model.blocks.X.* -> fusion_blocks.X.audio_block.*
+        elif k.startswith("audio_model.blocks."):
+            parts = k.split('.')
+            block_idx = parts[2]
+            remaining_path = ".".join(parts[3:])
+            new_key = f"fusion_blocks.{block_idx}.audio_block.{remaining_path}"
+        # 规则 3: video_model.* -> video_*
+        elif k.startswith("video_model."):
+            new_key = k.replace("video_model.", "video_")
+        # 规则 4: audio_model.* -> audio_*
+        elif k.startswith("audio_model."):
+            new_key = k.replace("audio_model.", "audio_")
+        
+        new_state_dict[new_key] = v
+    return new_state_dict
+
 
 
 if __name__ == "__main__":
@@ -592,8 +628,8 @@ if __name__ == "__main__":
     try:
         model = OviFusionWrapper()
         print(f"✓ Fusion model initialized")
-        print(f"  Video model device: {next(model.model.video_model.parameters()).device}, dtype: {next(model.model.video_model.parameters()).dtype}")
-        print(f"  Audio model device: {next(model.model.audio_model.parameters()).device}, dtype: {next(model.model.audio_model.parameters()).dtype}")
+        # print(f"  Video model device: {next(model.model.video_model.parameters()).device}, dtype: {next(model.model.video_model.parameters()).dtype}")
+        # print(f"  Audio model device: {next(model.model.audio_model.parameters()).device}, dtype: {next(model.model.audio_model.parameters()).dtype}")
         
         # 移动到GPU (模拟FSDP包装前的操作)
         model = model.cuda()

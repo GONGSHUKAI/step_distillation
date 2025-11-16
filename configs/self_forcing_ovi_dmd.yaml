@@ -1,7 +1,7 @@
 # FSDP related settings
-generator_fsdp_wrap_strategy: none
-real_score_fsdp_wrap_strategy: none
-fake_score_fsdp_wrap_strategy: none
+generator_fsdp_wrap_strategy: transformer
+real_score_fsdp_wrap_strategy: transformer
+fake_score_fsdp_wrap_strategy: transformer
 text_encoder_fsdp_wrap_strategy: size
 sharding_strategy: full
 

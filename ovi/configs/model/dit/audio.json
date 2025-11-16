@@ -13,5 +13,6 @@
   "qk_norm": true,
   "cross_attn_norm": true,
   "eps": 1e-6,
-  "temporal_rope_scaling_factor": 0.19676
+  "temporal_rope_scaling_factor": 0.19676,
+  "gradient_checkpointing": true
 }

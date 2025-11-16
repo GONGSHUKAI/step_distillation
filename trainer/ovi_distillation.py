@@ -14,6 +14,7 @@ from model.ovi_dmd import OviDMD # MODIFIED: Import OviDMD
 from utils.dataset import OviCSVDataset, cycle, OffsetDistributedSampler # MODIFIED: You need a new dataset class
 from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job
 from utils.misc import set_seed, merge_dict_list
+from ovi.modules.ovi import FusionAttentionBlock
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,8 @@ class Trainer: # MODIFIED: Renamed class
             self.model.generator,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
-            wrap_strategy=config.generator_fsdp_wrap_strategy
+            wrap_strategy=config.generator_fsdp_wrap_strategy,
+            transformer_module=(FusionAttentionBlock, )
         )
         logger.info(f"After FSDP, model architecture: {self.model.generator}") if self.is_main_process else None
         fsdp_student = sum(p.numel() for p in self.model.generator.parameters() if p.requires_grad)
@@ -91,7 +93,8 @@ class Trainer: # MODIFIED: Renamed class
             self.model.real_score,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
-            wrap_strategy=config.real_score_fsdp_wrap_strategy
+            wrap_strategy=config.real_score_fsdp_wrap_strategy,
+            transformer_module=(FusionAttentionBlock, )
         )
         fsdp_teacher = sum(p.numel() for p in self.model.real_score.parameters() if p.requires_grad)
         logger.info(f"After FSDP, teacher parameters: {fsdp_teacher/1e9:.2f}B") if self.is_main_process else None
@@ -102,7 +105,8 @@ class Trainer: # MODIFIED: Renamed class
             self.model.fake_score,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
-            wrap_strategy=config.fake_score_fsdp_wrap_strategy
+            wrap_strategy=config.fake_score_fsdp_wrap_strategy,
+            transformer_module=(FusionAttentionBlock, )
         )
         fsdp_critic = sum(p.numel() for p in self.model.fake_score.parameters() if p.requires_grad)
         logger.info(f"After FSDP, critic parameters: {fsdp_critic/1e9:.2f}B") if self.is_main_process else None
