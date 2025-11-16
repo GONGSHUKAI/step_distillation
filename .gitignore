@@ -200,3 +200,8 @@ cogvideox_output
 
 VBench
 *.pt
+
+utils/ovi_wrapper_exp.py
+data/tmp
+data/MagicData.csv
+ovi_distillation_adaption_plan.md

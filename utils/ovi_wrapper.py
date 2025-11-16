@@ -577,93 +577,93 @@ if __name__ == "__main__":
     # text_encoder = text_encoder.to(device=torch.device('cpu'))
     # del text_encoder 
 
-    # print("\n" + "=" * 50)
-    # print("Testing OviVAEWrapper (CPU initialization)...")
-    # print("=" * 50)
-    # try:
-    #     vae = OviVAEWrapper()
-    #     print(f"✓ VAE initialized")
-    #     print(f"  Video VAE device: {next(vae.video_vae.parameters()).device}, dtype: {next(vae.video_vae.parameters()).dtype}")
-    #     print(f"  Audio VAE device: {next(vae.audio_vae.parameters()).device}, dtype: {next(vae.audio_vae.parameters()).dtype}")
-        
-    #     # 移动到GPU (模拟Trainer中的操作)
-    #     vae = vae.to(device=torch.device('cuda'))
-    #     print(f"✓ VAE moved to GPU")
-    #     print(f"  Video VAE device: {next(vae.video_vae.parameters()).device}, dtype: {next(vae.video_vae.parameters()).dtype}")
-    #     print(f"  Audio VAE device: {next(vae.audio_vae.parameters()).device}, dtype: {next(vae.audio_vae.parameters()).dtype}")
-        
-    #     # 测试编解码
-    #     video = video_tensor.cuda()
-    #     video_latent = vae.encode_video(video)
-    #     print(f"✓ Video latent shape: {video_latent.shape}, dtype: {video_latent.dtype}")
-        
-    #     video_recon = vae.decode_video(video_latent)
-    #     print(f"✓ Video recon shape: {video_recon.shape}, dtype: {video_recon.dtype}")
-        
-    #     audio = audio_tensor.cuda()
-    #     # audio = torch.randn(1, 16000 * 5).cuda()   # 使用随机音频进行测试
-    #     audio_latent = vae.encode_audio(audio)
-    #     print(f"✓ Audio latent shape: {audio_latent.shape}, dtype: {audio_latent.dtype}")
-        
-    #     audio_recon = vae.decode_audio(audio_latent)
-    #     print(f"✓ Audio recon shape: {audio_recon.shape}, dtype: {audio_recon.dtype}")
-    #     audio_recon = audio_recon.squeeze(0)
-
-    #     # 保存视频、音频到/videogen/Wan2.2-TI2V-5B-Turbo/data/tmp
-    #     os.makedirs("/videogen/Wan2.2-TI2V-5B-Turbo/data/tmp", exist_ok=True)
-    #     save_video(video_recon, VIDEO_RECON_PATH, fps=24)
-    #     save_audio(audio_recon, AUDIO_RECON_PATH, sample_rate=16000)
-    #     print(f"✓ Reconstructed video and audio saved to /videogen/Wan2.2-TI2V-5B-Turbo/data/tmp/")
-    # except Exception as e:
-    #     print(f"✗ Error: {e}")
-    #     import traceback
-    #     traceback.print_exc()
-    
-    # vae = vae.to(device=torch.device('cpu'))
-    # del vae
-
     print("\n" + "=" * 50)
-    print("Testing OviFusionWrapper (CPU initialization)...")
+    print("Testing OviVAEWrapper (CPU initialization)...")
     print("=" * 50)
     try:
-        model = OviFusionWrapper()
-        print(f"✓ Fusion model initialized")
-        # print(f"  Video model device: {next(model.model.video_model.parameters()).device}, dtype: {next(model.model.video_model.parameters()).dtype}")
-        # print(f"  Audio model device: {next(model.model.audio_model.parameters()).device}, dtype: {next(model.model.audio_model.parameters()).dtype}")
+        vae = OviVAEWrapper()
+        print(f"✓ VAE initialized")
+        print(f"  Video VAE device: {next(vae.video_vae.parameters()).device}, dtype: {next(vae.video_vae.parameters()).dtype}")
+        print(f"  Audio VAE device: {next(vae.audio_vae.parameters()).device}, dtype: {next(vae.audio_vae.parameters()).dtype}")
         
-        # 移动到GPU (模拟FSDP包装前的操作)
-        model = model.cuda()
-        print(f"✓ Fusion model moved to GPU")
+        # 移动到GPU (模拟Trainer中的操作)
+        vae = vae.to(device=torch.device('cuda'))
+        print(f"✓ VAE moved to GPU")
+        print(f"  Video VAE device: {next(vae.video_vae.parameters()).device}, dtype: {next(vae.video_vae.parameters()).dtype}")
+        print(f"  Audio VAE device: {next(vae.audio_vae.parameters()).device}, dtype: {next(vae.audio_vae.parameters()).dtype}")
         
-        # 测试forward
-        # video_latent = video_latent.cuda().to(dtype=torch.bfloat16)           # standard video shape [B, F, C, H, W] = [B, 31, 48, 44, 80]
-        video_latent = torch.randn(1, 31, 48, 44, 80).cuda().to(dtype=torch.bfloat16)  # 使用随机潜变量进行测试，形状为 [B, F, C, H, W]
-        # audio_latent = audio_latent.permute(0, 2, 1).cuda().to(dtype=torch.bfloat16)                  # standard audio shape [B, L, D] = [B, 157, 20]
-        audio_latent = torch.randn(1, 157, 20).cuda().to(dtype=torch.bfloat16)  # 使用随机潜变量进行测试，形状为 [B, L, D]
-        timestep = torch.ones(1).long().cuda() * 500
-        # text_embeds = result['prompt_embeds'].cuda().to(dtype=torch.bfloat16)
-        text_embeds = torch.randn(1, 512, 4096).cuda().to(dtype=torch.bfloat16)  # 使用随机文本嵌入进行测试，形状为 [B, Seq_Len, D]
-        conditional_dict = {"prompt_embeds": text_embeds}
-        print(f"✓ Input video_latent shape: {video_latent.shape}, dtype: {video_latent.dtype}")
-        print(f"✓ Input audio_latent shape: {audio_latent.shape}, dtype: {audio_latent.dtype}")
-        print(f"✓ Input timestep: {timestep}")
-        print(f"✓ Input text_embeds shape: {text_embeds.shape}, dtype: {text_embeds.dtype}")
-        pred_video, pred_audio = model(
-            video_latent=video_latent,
-            audio_latent=audio_latent,
-            timestep=timestep,
-            conditional_dict=conditional_dict,
-        )
+        # 测试编解码
+        video = video_tensor.cuda()
+        video_latent = vae.encode_video(video)
+        print(f"✓ Video latent shape: {video_latent.shape}, dtype: {video_latent.dtype}")
         
-        print(f"✓ Pred video shape: {pred_video.shape}, dtype: {pred_video.dtype}")
-        print(f"✓ Pred audio shape: {pred_audio.shape}, dtype: {pred_audio.dtype}")
+        video_recon = vae.decode_video(video_latent)
+        print(f"✓ Video recon shape: {video_recon.shape}, dtype: {video_recon.dtype}")
+        
+        audio = audio_tensor.cuda()
+        # audio = torch.randn(1, 16000 * 5).cuda()   # 使用随机音频进行测试
+        audio_latent = vae.encode_audio(audio)
+        print(f"✓ Audio latent shape: {audio_latent.shape}, dtype: {audio_latent.dtype}")
+        
+        audio_recon = vae.decode_audio(audio_latent)
+        print(f"✓ Audio recon shape: {audio_recon.shape}, dtype: {audio_recon.dtype}")
+        audio_recon = audio_recon.squeeze(0)
+
+        # 保存视频、音频到/videogen/Wan2.2-TI2V-5B-Turbo/data/tmp
+        os.makedirs("/videogen/Wan2.2-TI2V-5B-Turbo/data/tmp", exist_ok=True)
+        save_video(video_recon, VIDEO_RECON_PATH, fps=24)
+        save_audio(audio_recon, AUDIO_RECON_PATH, sample_rate=16000)
+        print(f"✓ Reconstructed video and audio saved to /videogen/Wan2.2-TI2V-5B-Turbo/data/tmp/")
     except Exception as e:
         print(f"✗ Error: {e}")
         import traceback
         traceback.print_exc()
     
-    del model
+    # vae = vae.to(device=torch.device('cpu'))
+    # del vae
 
-    print("\n" + "=" * 50)
-    print("All tests completed!")
-    print("=" * 50)
+    # print("\n" + "=" * 50)
+    # print("Testing OviFusionWrapper (CPU initialization)...")
+    # print("=" * 50)
+    # try:
+    #     model = OviFusionWrapper()
+    #     print(f"✓ Fusion model initialized")
+    #     # print(f"  Video model device: {next(model.model.video_model.parameters()).device}, dtype: {next(model.model.video_model.parameters()).dtype}")
+    #     # print(f"  Audio model device: {next(model.model.audio_model.parameters()).device}, dtype: {next(model.model.audio_model.parameters()).dtype}")
+        
+    #     # 移动到GPU (模拟FSDP包装前的操作)
+    #     model = model.cuda()
+    #     print(f"✓ Fusion model moved to GPU")
+        
+    #     # 测试forward
+    #     # video_latent = video_latent.cuda().to(dtype=torch.bfloat16)           # standard video shape [B, F, C, H, W] = [B, 31, 48, 44, 80]
+    #     video_latent = torch.randn(1, 31, 48, 44, 80).cuda().to(dtype=torch.bfloat16)  # 使用随机潜变量进行测试，形状为 [B, F, C, H, W]
+    #     # audio_latent = audio_latent.permute(0, 2, 1).cuda().to(dtype=torch.bfloat16)                  # standard audio shape [B, L, D] = [B, 157, 20]
+    #     audio_latent = torch.randn(1, 157, 20).cuda().to(dtype=torch.bfloat16)  # 使用随机潜变量进行测试，形状为 [B, L, D]
+    #     timestep = torch.ones(1).long().cuda() * 500
+    #     # text_embeds = result['prompt_embeds'].cuda().to(dtype=torch.bfloat16)
+    #     text_embeds = torch.randn(1, 512, 4096).cuda().to(dtype=torch.bfloat16)  # 使用随机文本嵌入进行测试，形状为 [B, Seq_Len, D]
+    #     conditional_dict = {"prompt_embeds": text_embeds}
+    #     print(f"✓ Input video_latent shape: {video_latent.shape}, dtype: {video_latent.dtype}")
+    #     print(f"✓ Input audio_latent shape: {audio_latent.shape}, dtype: {audio_latent.dtype}")
+    #     print(f"✓ Input timestep: {timestep}")
+    #     print(f"✓ Input text_embeds shape: {text_embeds.shape}, dtype: {text_embeds.dtype}")
+    #     pred_video, pred_audio = model(
+    #         video_latent=video_latent,
+    #         audio_latent=audio_latent,
+    #         timestep=timestep,
+    #         conditional_dict=conditional_dict,
+    #     )
+        
+    #     print(f"✓ Pred video shape: {pred_video.shape}, dtype: {pred_video.dtype}")
+    #     print(f"✓ Pred audio shape: {pred_audio.shape}, dtype: {pred_audio.dtype}")
+    # except Exception as e:
+    #     print(f"✗ Error: {e}")
+    #     import traceback
+    #     traceback.print_exc()
+    
+    # del model
+
+    # print("\n" + "=" * 50)
+    # print("All tests completed!")
+    # print("=" * 50)
