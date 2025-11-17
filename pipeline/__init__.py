@@ -6,6 +6,7 @@ from .causal_diffusion_inference import CausalDiffusionInferencePipeline
 from .causal_inference import CausalInferencePipeline
 from .self_forcing_training import SelfForcingTrainingPipeline
 from .wan22_fewstep_inference import Wan22FewstepInferencePipeline
+from .ovi_fewstep_inference import OviFewstepInferencePipeline
 
 __all__ = [
     "BidirectionalDiffusionInferencePipeline",
@@ -15,5 +16,6 @@ __all__ = [
     "CausalDiffusionInferencePipeline",
     "CausalInferencePipeline",
     "SelfForcingTrainingPipeline",
-    "Wan22FewstepInferencePipeline"
+    "Wan22FewstepInferencePipeline",
+    "OviFewstepInferencePipeline",
 ]

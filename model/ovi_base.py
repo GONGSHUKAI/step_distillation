@@ -11,6 +11,9 @@ from pipeline import OviBidirectionalTrainingPipeline # You need to create this
 from utils.loss import get_denoising_loss
 from utils.ovi_wrapper import OviFusionWrapper, OviTextEncoder, OviVAEWrapper # Use your Ovi wrappers
 
+import logging
+logger = logging.getLogger(__name__)
+
 class OviBaseModel(nn.Module):
     def __init__(self, args, device):
         super().__init__()
@@ -21,10 +24,14 @@ class OviBaseModel(nn.Module):
         self.args = args
         self.dtype = torch.bfloat16 if args.mixed_precision else torch.float32
         if hasattr(args, "denoising_step_list"):
+            # say, denoising_step_list = [1000, 750, 500, 250]
             self.denoising_step_list = torch.tensor(args.denoising_step_list, dtype=torch.long)
             if args.warp_denoising_step:
                 timesteps = torch.cat((self.generator.scheduler.timesteps.cpu(), torch.tensor([0], dtype=torch.float32)))
                 self.denoising_step_list = timesteps[1000 - self.denoising_step_list]
+                logger.info(f"Warped denoising step list: {self.denoising_step_list.tolist()}") if dist.get_rank() == 0 else None
+                # timesteps[1000 - self.denoising_step_list] means [timesteps[0], timesteps[250], timesteps[500], timesteps[750]]
+                # self.denoising_step_list = torch.tensor([1000, 937.5, 833.33, 625.0])
 
     def _initialize_models(self, args, device):
         self.real_model_name = getattr(args, "real_name", "Ovi")        # the teacher model

@@ -159,7 +159,7 @@ class FusionModel(nn.Module):
         self.set_rope_params()
 
         self.gradient_checkpointing = vc['gradient_checkpointing'] if 'gradient_checkpointing' in vc else False
-        logger.info(f"Using gradient checkpointing: {(self.gradient_checkpointing and self.training)}") if dist.get_rank() == 0 else None
+        # logger.info(f"Using gradient checkpointing: {(self.gradient_checkpointing and self.training)}") if dist.get_rank() == 0 else None
         
     # --- 以下方法是从 WanModel 复制并适配的 ---
     def prepare_transformer_block_kwargs(self, x, t, context, seq_len, clip_fea, y, first_frame_is_clean, is_video):

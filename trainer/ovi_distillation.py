@@ -270,7 +270,7 @@ class Trainer: # MODIFIED: Renamed class
                         f"checkpoint_model_{self.step:06d}"), exist_ok=True)
             torch.save(state_dict, os.path.join(self.output_path,
                        f"checkpoint_model_{self.step:06d}", "model.pt"))
-            logger.info("Model saved to", os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}", "model.pt"))
+            logger.info(f"Model saved to {os.path.join(self.output_path, f'checkpoint_model_{self.step:06d}', 'model.pt')}")
 
     def fwdbwd_one_step(self, batch, train_generator):
         # --- HEAVILY MODIFIED FOR OVI ---
@@ -292,12 +292,17 @@ class Trainer: # MODIFIED: Renamed class
             
             # Text encoding
             conditional_dict = self.model.text_encoder(text_prompts=text_prompts)
+            conditional_dict = {
+                "video_prompt_embeds": conditional_dict["prompt_embeds"].detach(),
+                "audio_prompt_embeds": conditional_dict["prompt_embeds"].detach(),
+            }
             if not getattr(self, "unconditional_dict", None):
-                self.unconditional_dict_v = self.model.text_encoder(text_prompts=[self.config.video_negative_prompt] * len(text_prompts))
-                self.unconditional_dict_a = self.model.text_encoder(text_prompts=[self.config.audio_negative_prompt] * len(text_prompts))
-                unconditional_dict = {k: v.detach() for k, v in self.unconditional_dict_v.items()}
-                unconditional_dict.update({k: v.detach() for k, v in self.unconditional_dict_a.items()})
-                self.unconditional_dict = unconditional_dict  # cache the unconditional_dict
+                vid_neg_prompt_embed = self.model.text_encoder(text_prompts=[self.config.video_negative_prompt] * len(text_prompts))
+                aud_neg_prompt_embed = self.model.text_encoder(text_prompts=[self.config.audio_negative_prompt] * len(text_prompts))
+                self.unconditional_dict = {
+                    "video_prompt_embeds": vid_neg_prompt_embed["prompt_embeds"].detach(),
+                    "audio_prompt_embeds": aud_neg_prompt_embed["prompt_embeds"].detach(),
+                }
             unconditional_dict = self.unconditional_dict
         
         # Define latent shapes from config
