@@ -175,6 +175,11 @@ def main():
         print("Loaded 'generator' weights.")
     else:
         print("Loaded weights directly from checkpoint.")
+    # if "generator" in state_dict:
+    #     state_dict = state_dict["generator"]
+    #     print("Loaded 'generator' weights.")
+    # else:
+    #     print("Loaded weights directly from checkpoint.")
 
     cleaned_state_dict = {}
     for key, value in state_dict.items():

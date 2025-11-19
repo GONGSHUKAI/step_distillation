@@ -220,18 +220,18 @@ class OviFusionWrapper(torch.nn.Module):
         self.model = FusionModel(self.video_config, self.audio_config).to(dtype=torch.bfloat16, device=torch.device('cpu'))
         logger.info(f"Ovi FusionModel initialized, loading model weights...") if dist.get_rank() == 0 else None
 
-        # original_state_dict = load_file(
-        #     f"/videogen/Ovi/ckpts/{self.model_name}/model.safetensors", device='cpu'
-        # )
-        # remapped_state_dict = remap_ovi_state_dict_for_refactored(original_state_dict)
+        original_state_dict = load_file(
+            f"/videogen/Ovi/ckpts/{self.model_name}/model.safetensors", device='cpu'
+        )
+        remapped_state_dict = remap_ovi_state_dict_for_refactored(original_state_dict)
 
-        # missing_keys, unexpected_keys = self.model.load_state_dict(remapped_state_dict, strict=False)
-        # if missing_keys: 
-        #     logger.warning(f"Ovi weights loading: Missing keys: {missing_keys}")
-        # if unexpected_keys: 
-        #     logger.warning(f"Ovi weights loading: Unexpected keys: {unexpected_keys}")
+        missing_keys, unexpected_keys = self.model.load_state_dict(remapped_state_dict, strict=False)
+        if missing_keys: 
+            logger.warning(f"Ovi weights loading: Missing keys: {missing_keys}")
+        if unexpected_keys: 
+            logger.warning(f"Ovi weights loading: Unexpected keys: {unexpected_keys}")
         
-        # logger.info(f"Ovi weights loaded into refactored model.") if dist.get_rank() == 0 else None
+        logger.info(f"Ovi weights loaded into refactored model.") if dist.get_rank() == 0 else None
         self.model.eval()
 
         self.scheduler = FlowMatchScheduler(

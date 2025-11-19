@@ -57,8 +57,8 @@ class OviFewstepInferencePipeline(torch.nn.Module):
         # +++ START NEW PARAMS +++
         video_guidance_scale: float = 4.0,
         audio_guidance_scale: float = 3.0,
-        video_negative_prompt: str = "",
-        audio_negative_prompt: str = ""
+        video_negative_prompt: str = "jitter, bad hands, blur, distortion, watermark, text, low quality",
+        audio_negative_prompt: str = "robotic, muffled, echo, distorted, noise, low quality"
         # +++ END NEW PARAMS +++
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         
@@ -192,6 +192,10 @@ class OviFewstepInferencePipeline(torch.nn.Module):
         device = noise_video.device
         dtype = noise_video.dtype
         conditional_dict = self.text_encoder(text_prompts=text_prompts)
+        conditional_dict = {
+            "video_prompt_embeds": conditional_dict["prompt_embeds"],
+            "audio_prompt_embeds": conditional_dict["prompt_embeds"],
+        }
         noisy_video = noise_video
         noisy_audio = noise_audio
         mask1, mask2 = masks_like(noisy_video, zero=True)
