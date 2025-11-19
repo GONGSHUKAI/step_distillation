@@ -497,118 +497,122 @@ if __name__ == "__main__":
     )
     print(f"✓ DataLoader created with batch size {BATCH_SIZE}.")
 
-    try:
-        print("\nFetching one batch...")
-        batch = next(iter(data_loader))
-        print("✓ Batch fetched successfully.")
+    for idx, batch in enumerate(data_loader):
+        if idx >= 3:
+            break
+        try:
+            print("\nFetching one batch...")
+            print("✓ Batch fetched successfully.")
 
-        # 4. Verify the contents and shapes
-        print("\n--- Batch Content Verification ---")
-        video_tensor = batch["video"]
-        audio_tensor = batch["audio"]
-        PROMPT = batch["prompts"]
+            # 4. Verify the contents and shapes
+            print("\n--- Batch Content Verification ---")
+            video_tensor = batch["video"]
+            audio_tensor = batch["audio"]
+            PROMPT = batch["prompts"]
 
-        print(f"  - Prompts:")
-        print(f"    - Type: {type(PROMPT)}")
-        print(f"    - Length: {len(PROMPT)} (should match batch size of {BATCH_SIZE})")
-        print(f"    - Example prompt: '{PROMPT[0][:80]}...'")
+            print(f"  - Prompts:")
+            print(f"    - Type: {type(PROMPT)}")
+            print(f"    - Length: {len(PROMPT)} (should match batch size of {BATCH_SIZE})")
+            print(f"    - Example prompt: '{PROMPT[0][:80]}...'")
 
-        print(f"\n  - Video Tensor:")
-        print(f"    - Shape: {video_tensor.shape}")
-        print(f"    - Dtype: {video_tensor.dtype}")
-        print(f"    - Value Range: min={video_tensor.min():.2f}, max={video_tensor.max():.2f} (should be approx. [-1, 1])")
-        
-        # Assertions to confirm the shape is correct for the model VAE
-        assert len(video_tensor.shape) == 5, f"Video tensor should have 5 dimensions, but got {len(video_tensor.shape)}"
-        assert video_tensor.shape[0] == BATCH_SIZE, f"Video batch size is incorrect, expected {BATCH_SIZE}"
-        assert video_tensor.shape[1] == 3, "Video should have 3 channels (RGB)"
-        print("    - Shape is valid for VAE input.")
+            print(f"\n  - Video Tensor:")
+            print(f"    - Shape: {video_tensor.shape}")
+            print(f"    - Dtype: {video_tensor.dtype}")
+            print(f"    - Value Range: min={video_tensor.min():.2f}, max={video_tensor.max():.2f} (should be approx. [-1, 1])")
+            
+            # Assertions to confirm the shape is correct for the model VAE
+            assert len(video_tensor.shape) == 5, f"Video tensor should have 5 dimensions, but got {len(video_tensor.shape)}"
+            assert video_tensor.shape[0] == BATCH_SIZE, f"Video batch size is incorrect, expected {BATCH_SIZE}"
+            assert video_tensor.shape[1] == 3, "Video should have 3 channels (RGB)"
+            print("    - Shape is valid for VAE input.")
 
-        print(f"\n  - Audio Tensor:")
-        print(f"    - Shape: {audio_tensor.shape}")
-        print(f"    - Dtype: {audio_tensor.dtype}")
-        
-        # Assertions to confirm the shape is correct
-        assert len(audio_tensor.shape) == 2, f"Audio tensor should have 2 dimensions, but got {len(audio_tensor.shape)}"
-        assert audio_tensor.shape[0] == BATCH_SIZE, f"Audio batch size is incorrect, expected {BATCH_SIZE}"
-        print("    - Shape is valid for VAE input.")
+            print(f"\n  - Audio Tensor:")
+            print(f"    - Shape: {audio_tensor.shape}")
+            print(f"    - Dtype: {audio_tensor.dtype}")
+            
+            # Assertions to confirm the shape is correct
+            assert len(audio_tensor.shape) == 2, f"Audio tensor should have 2 dimensions, but got {len(audio_tensor.shape)}"
+            assert audio_tensor.shape[0] == BATCH_SIZE, f"Audio batch size is incorrect, expected {BATCH_SIZE}"
+            print("    - Shape is valid for VAE input.")
 
-        print("\n\033[92m✓ Batch shapes and dtypes are correct and match the requirements for the Ovi model.\033[0m")
-
-
-    except StopIteration:
-        print("✗ DataLoader is empty. This might happen if the CSV is empty or cannot be read.")
-    except Exception as e:
-        print(f"✗ An error occurred while fetching or inspecting the batch: {e}")
-        import traceback
-        traceback.print_exc()
+            print("\n\033[92m✓ Batch shapes and dtypes are correct and match the requirements for the Ovi model.\033[0m")
 
 
-    # print("=" * 50)
-    # print("Testing OviTextEncoder (CPU initialization)...")
-    # print("=" * 50)
-    # try:
-    #     text_encoder = OviTextEncoder()
-    #     print(f"✓ Text encoder initialized on: {next(text_encoder.parameters()).device}")
-        
-    #     # 移动到GPU (模拟FSDP包装前的操作)
-    #     text_encoder = text_encoder.cuda()
-    #     print(f"✓ Text encoder moved to: {next(text_encoder.parameters()).device}")
-        
-    #     # 测试forward
-    #     prompts = PROMPT
-    #     result = text_encoder(prompts)
-    #     print(f"✓ prompt_embeds shape: {result['prompt_embeds'].shape}")
-    #     print(f"✓ prompt_embeds device: {result['prompt_embeds'].device}")
-    # except Exception as e:
-    #     print(f"✗ Error: {e}")
-    #     import traceback
-    #     traceback.print_exc()
+        except StopIteration:
+            print("✗ DataLoader is empty. This might happen if the CSV is empty or cannot be read.")
+        except Exception as e:
+            print(f"✗ An error occurred while fetching or inspecting the batch: {e}")
+            import traceback
+            traceback.print_exc()
 
-    # text_encoder = text_encoder.to(device=torch.device('cpu'))
-    # del text_encoder 
 
-    print("\n" + "=" * 50)
-    print("Testing OviVAEWrapper (CPU initialization)...")
-    print("=" * 50)
-    try:
-        vae = OviVAEWrapper()
-        print(f"✓ VAE initialized")
-        print(f"  Video VAE device: {next(vae.video_vae.parameters()).device}, dtype: {next(vae.video_vae.parameters()).dtype}")
-        print(f"  Audio VAE device: {next(vae.audio_vae.parameters()).device}, dtype: {next(vae.audio_vae.parameters()).dtype}")
-        
-        # 移动到GPU (模拟Trainer中的操作)
-        vae = vae.to(device=torch.device('cuda'))
-        print(f"✓ VAE moved to GPU")
-        print(f"  Video VAE device: {next(vae.video_vae.parameters()).device}, dtype: {next(vae.video_vae.parameters()).dtype}")
-        print(f"  Audio VAE device: {next(vae.audio_vae.parameters()).device}, dtype: {next(vae.audio_vae.parameters()).dtype}")
-        
-        # 测试编解码
-        video = video_tensor.cuda()
-        video_latent = vae.encode_video(video)
-        print(f"✓ Video latent shape: {video_latent.shape}, dtype: {video_latent.dtype}")
-        
-        video_recon = vae.decode_video(video_latent)
-        print(f"✓ Video recon shape: {video_recon.shape}, dtype: {video_recon.dtype}")
-        
-        audio = audio_tensor.cuda()
-        # audio = torch.randn(1, 16000 * 5).cuda()   # 使用随机音频进行测试
-        audio_latent = vae.encode_audio(audio)
-        print(f"✓ Audio latent shape: {audio_latent.shape}, dtype: {audio_latent.dtype}")
-        
-        audio_recon = vae.decode_audio(audio_latent)
-        print(f"✓ Audio recon shape: {audio_recon.shape}, dtype: {audio_recon.dtype}")
-        audio_recon = audio_recon.squeeze(0)
+        # print("=" * 50)
+        # print("Testing OviTextEncoder (CPU initialization)...")
+        # print("=" * 50)
+        # try:
+        #     text_encoder = OviTextEncoder()
+        #     print(f"✓ Text encoder initialized on: {next(text_encoder.parameters()).device}")
+            
+        #     # 移动到GPU (模拟FSDP包装前的操作)
+        #     text_encoder = text_encoder.cuda()
+        #     print(f"✓ Text encoder moved to: {next(text_encoder.parameters()).device}")
+            
+        #     # 测试forward
+        #     prompts = PROMPT
+        #     result = text_encoder(prompts)
+        #     print(f"✓ prompt_embeds shape: {result['prompt_embeds'].shape}")
+        #     print(f"✓ prompt_embeds device: {result['prompt_embeds'].device}")
+        # except Exception as e:
+        #     print(f"✗ Error: {e}")
+        #     import traceback
+        #     traceback.print_exc()
 
-        # 保存视频、音频到/videogen/Wan2.2-TI2V-5B-Turbo/data/tmp
-        os.makedirs("/videogen/Wan2.2-TI2V-5B-Turbo/data/tmp", exist_ok=True)
-        save_video(video_recon, VIDEO_RECON_PATH, fps=24)
-        save_audio(audio_recon, AUDIO_RECON_PATH, sample_rate=16000)
-        print(f"✓ Reconstructed video and audio saved to /videogen/Wan2.2-TI2V-5B-Turbo/data/tmp/")
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        import traceback
-        traceback.print_exc()
+        # text_encoder = text_encoder.to(device=torch.device('cpu'))
+        # del text_encoder 
+
+        print("\n" + "=" * 50)
+        print("Testing OviVAEWrapper (CPU initialization)...")
+        print("=" * 50)
+        try:
+            vae = OviVAEWrapper()
+            print(f"✓ VAE initialized")
+            print(f"  Video VAE device: {next(vae.video_vae.parameters()).device}, dtype: {next(vae.video_vae.parameters()).dtype}")
+            print(f"  Audio VAE device: {next(vae.audio_vae.parameters()).device}, dtype: {next(vae.audio_vae.parameters()).dtype}")
+            
+            # 移动到GPU (模拟Trainer中的操作)
+            vae = vae.to(device=torch.device('cuda'))
+            print(f"✓ VAE moved to GPU")
+            print(f"  Video VAE device: {next(vae.video_vae.parameters()).device}, dtype: {next(vae.video_vae.parameters()).dtype}")
+            print(f"  Audio VAE device: {next(vae.audio_vae.parameters()).device}, dtype: {next(vae.audio_vae.parameters()).dtype}")
+            
+            # # 测试编解码
+            # video = video_tensor.cuda()
+            # video_latent = vae.encode_video(video)
+            # print(f"✓ Video latent shape: {video_latent.shape}, dtype: {video_latent.dtype}")
+            # print(f"  latent mean: {video_latent.mean().item():.4f}, std: {video_latent.std().item():.4f}, min: {video_latent.min().item():.4f}, max: {video_latent.max().item():.4f}")
+            
+            # video_recon = vae.decode_video(video_latent)
+            # print(f"✓ Video recon shape: {video_recon.shape}, dtype: {video_recon.dtype}")
+            
+            audio = audio_tensor.cuda()
+            # audio = torch.randn(1, 16000 * 5).cuda()   # 使用随机音频进行测试
+            audio_latent = vae.encode_audio(audio)
+            print(f"✓ Audio latent shape: {audio_latent.shape}, dtype: {audio_latent.dtype}")
+            print(f"  latent mean: {audio_latent.mean().item():.4f}, std: {audio_latent.std().item():.4f}, min: {audio_latent.min().item():.4f}, max: {audio_latent.max().item():.4f}")
+            
+            audio_recon = vae.decode_audio(audio_latent)
+            print(f"✓ Audio recon shape: {audio_recon.shape}, dtype: {audio_recon.dtype}")
+            audio_recon = audio_recon.squeeze(0)
+
+            # 保存视频、音频到/videogen/Wan2.2-TI2V-5B-Turbo/data/tmp
+            os.makedirs("/videogen/Wan2.2-TI2V-5B-Turbo/data/tmp", exist_ok=True)
+            # save_video(video_recon, VIDEO_RECON_PATH, fps=24)
+            save_audio(audio_recon, AUDIO_RECON_PATH, sample_rate=16000)
+            print(f"✓ Reconstructed video and audio saved to /videogen/Wan2.2-TI2V-5B-Turbo/data/tmp/")
+        except Exception as e:
+            print(f"✗ Error: {e}")
+            import traceback
+            traceback.print_exc()
     
     # vae = vae.to(device=torch.device('cpu'))
     # del vae

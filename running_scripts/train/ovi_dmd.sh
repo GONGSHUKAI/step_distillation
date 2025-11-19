@@ -3,7 +3,7 @@ MASTER_PORT=${MLP_WORKER_0_PORT:-1234}
 NNODES=${MLP_WORKER_NUM:-1}
 NODE_RANK=${MLP_ROLE_INDEX:-0}
 NPROC_PER_NODE=${NPROC_PER_NODE:-8}
-LOGDIR="/videogen/Wan2.2-TI2V-5B-Turbo/logs/distill_ovi"
+LOGDIR="/videogen/Wan2.2-TI2V-5B-Turbo/logs/distill_ovi_lr2e-6_lr_critic_4e-7_weighted_loss"
 
 torchrun \
     --nproc_per_node=${NPROC_PER_NODE} \

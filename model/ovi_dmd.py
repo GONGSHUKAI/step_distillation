@@ -220,7 +220,8 @@ class OviDMD(OviSelfForcingModel):
 
         # --- Combine Losses ---
         # A simple sum is used here. You could introduce a weighting factor if needed.
-        total_dmd_loss = dmd_loss_video + dmd_loss_audio
+        # total_dmd_loss = dmd_loss_video + dmd_loss_audio
+        total_dmd_loss = 0.85 * dmd_loss_video + 0.15 * dmd_loss_audio   # Weighted sum, more focus on video branch
         dmd_log_dict['dmd_loss_video'] = dmd_loss_video.detach()
         dmd_log_dict['dmd_loss_audio'] = dmd_loss_audio.detach()
         
