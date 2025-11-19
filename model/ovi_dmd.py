@@ -353,7 +353,7 @@ class OviDMD(OviSelfForcingModel):
         )
 
         # --- Combine Losses ---
-        total_denoising_loss = denoising_loss_video + denoising_loss_audio
+        total_denoising_loss = 0.85 * denoising_loss_video + 0.15 * denoising_loss_audio
         
         critic_log_dict = {
             "critic_loss_video": denoising_loss_video.detach(),

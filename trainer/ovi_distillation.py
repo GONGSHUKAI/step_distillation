@@ -351,8 +351,7 @@ class Trainer: # MODIFIED: Renamed class
         # --- MODIFIED FOR OVI LOGGING ---
         start_step = self.step
         while True:
-            if self.is_main_process:
-                print(f"training step {self.step} ...")
+            logger.info(f"training step {self.step} ...") if self.is_main_process else None
             TRAIN_GENERATOR = self.step % self.config.dfake_gen_update_ratio == 0
 
             # Train Generator
@@ -371,7 +370,7 @@ class Trainer: # MODIFIED: Renamed class
             critic_log_dict = self.fwdbwd_one_step(batch, train_generator=False)
             if not self.config.debug:
                 self.critic_optimizer.step()
-
+                
             self.step += 1
             
             # EMA creation
@@ -396,6 +395,7 @@ class Trainer: # MODIFIED: Renamed class
                         "GradNorm/DMD_Video": generator_log_dict["dmdtrain_gradient_norm_video"].mean().item(),
                         "GradNorm/DMD_Audio": generator_log_dict["dmdtrain_gradient_norm_audio"].mean().item(),
                     })
+                    logger.info(f"Step {self.step}: Generator Loss: {generator_log_dict['generator_loss'].mean().item():.4f}, Video DMD Loss: {generator_log_dict['dmd_loss_video'].mean().item():.4f}, Audio DMD Loss: {generator_log_dict['dmd_loss_audio'].mean().item():.4f}, GradNorm: {generator_log_dict['generator_grad_norm'].mean().item():.4f}, DMD Video GradNorm: {generator_log_dict['dmdtrain_gradient_norm_video'].mean().item():.4f}, DMD Audio GradNorm: {generator_log_dict['dmdtrain_gradient_norm_audio'].mean().item():.4f}")
                 
                 wandb_log.update({
                     "Loss/Critic": critic_log_dict["critic_loss"].mean().item(),
@@ -403,6 +403,7 @@ class Trainer: # MODIFIED: Renamed class
                     "Loss/Critic_Audio": critic_log_dict["critic_loss_audio"].mean().item(),
                     "GradNorm/Critic": critic_log_dict["critic_grad_norm"].mean().item(),
                 })
+                logger.info(f"Step {self.step}: Critic Loss: {critic_log_dict['critic_loss'].mean().item():.4f}, Critic Video Loss: {critic_log_dict['critic_loss_video'].mean().item():.4f}, Critic Audio Loss: {critic_log_dict['critic_loss_audio'].mean().item():.4f}, GradNorm: {critic_log_dict['critic_grad_norm'].mean().item():.4f}")
                 if not self.disable_wandb:
                     wandb.log(wandb_log, step=self.step)
 
