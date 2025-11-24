@@ -62,9 +62,9 @@ def save_audio(waveform: torch.Tensor, path: str, sample_rate: int):
     sf.write(path, waveform_np, sample_rate)
     print(f"   - 临时音频已保存至: {path}")
 
-def process_one(pipe: OviFewstepInferencePipeline, prompt, image_path, seed, idx, config):
+def process_one(pipe: OviFewstepInferencePipeline, prompt, image_path, seed, idx, config, args):
     """处理CSV文件中的单行数据"""
-    output_dir = config.output_dir
+    output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
     base_filename = f"line_{idx:03d}_seed_{seed}"
     final_output_path = os.path.join(output_dir, f"{base_filename}_final.mp4")
@@ -204,7 +204,7 @@ def main():
             
             print("\n" + "="*50)
             print(f"🎬 正在处理第 {idx+1} 行: {prompt[:80]}..., seed: {seed}")
-            process_one(pipe, prompt, image_path, seed, idx + 1, config)
+            process_one(pipe, prompt, image_path, seed, idx + 1, config, args)
             print("="*50)
 
 if __name__ == "__main__":

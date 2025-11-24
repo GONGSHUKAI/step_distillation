@@ -62,7 +62,7 @@ class OviDMD(OviSelfForcingModel):
         noisy_video, noisy_audio = noisy_latents
         estimated_clean_video, estimated_clean_audio = estimated_clean_latents
 
-        # --- Wan2.2 Specific Pre-processing for VIDEO branch ONLY ---
+        # --- Ovi Specific Pre-processing for VIDEO branch ONLY ---
         if "Ovi" in self.generator.model_name and wan22_image_latent is not None:
             # Create mask and mix the first frame latent for the video
             mask1, mask2 = masks_like(noisy_video, zero=True)
@@ -300,8 +300,8 @@ class OviDMD(OviSelfForcingModel):
         audio_timestep_flat = critic_timestep[:,0].unsqueeze(1).repeat(1, generated_audio.shape[1]).flatten()
         noisy_generated_audio = self.scheduler.add_noise(generated_audio.flatten(0, 1), critic_noise_audio.flatten(0, 1), audio_timestep_flat).unflatten(0, (batch_size, generated_audio.shape[1]))
 
-        # Step 3: Apply Wan2.2 specific processing for the VIDEO branch ONLY
-        if "2.2" in self.generator.model_name and wan22_image_latent is not None:
+        # Step 3: Apply Ovi specific processing for the VIDEO branch ONLY
+        if "Ovi" in self.generator.model_name and wan22_image_latent is not None:
             mask1, mask2 = masks_like(noisy_generated_video, zero=True)
             mask2 = torch.stack(mask2, dim=0)
             noisy_generated_video = (1. - mask2) * wan22_image_latent + mask2 * noisy_generated_video
@@ -321,6 +321,7 @@ class OviDMD(OviSelfForcingModel):
             timestep=critic_timestep,
             mask2=mask2,
             wan22_image_latent=wan22_image_latent,
+            first_frame_is_clean=first_frame_is_clean,
         )
 
         # Step 5: Compute the denoising loss for the critic on both branches

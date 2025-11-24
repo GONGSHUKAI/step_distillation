@@ -17,6 +17,7 @@ import decord
 from torchvision.transforms.functional import resize
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 
 class OffsetDistributedSampler(DistributedSampler):
     def __init__(self, dataset, initial_step=0, gpu_num=4, **kwargs):
@@ -385,32 +386,35 @@ class OviCSVDataset(Dataset):
         return len(self.data)
 
     def _preprocess_video(self, video_path: str) -> torch.Tensor:
-        """Loads and preprocesses a video file."""
         path = Path(video_path)
         video_reader = decord.VideoReader(uri=path.as_posix(), num_threads=1)
-        total_frames = (len(video_reader) - 1) // 4 * 4 + 1  # 4n+1
-        frame_indices = list(range(total_frames))
-        frames = torch.from_numpy(video_reader.get_batch(frame_indices).asnumpy()).float() # [T, H, W, C]
-        frames = frames.permute(0, 3, 1, 2).contiguous()  # [T, C, H, W]
-
-        orig_w, orig_h = frames.shape[3], frames.shape[2]
-        max_pixels = self.h * self.w
-        ori_pixels = orig_w * orig_h
-        if ori_pixels <= max_pixels:
-            target_w, target_h = orig_w, orig_h
+        total_frames_in_video = len(video_reader)
+        if total_frames_in_video >= self.num_frames:
+            frame_indices = list(range(self.num_frames))
         else:
-            aspect_ratio = orig_w / orig_h
-            target_h = int(math.sqrt(max_pixels / aspect_ratio))
-            target_w = int(target_h * aspect_ratio)
-        # Snap to multiple of 32 for model compatibility
-        target_h = (target_h // 32) * 32
-        target_w = (target_w // 32) * 32
+            frame_indices = [i % total_frames_in_video for i in range(self.num_frames)]
+        frames = torch.from_numpy(video_reader.get_batch(frame_indices).asnumpy()).float()
+        frames = frames.permute(0, 3, 1, 2)  # [T, C, H, W]
+        T, C, H_orig, W_orig = frames.shape
+        target_aspect = self.w / self.h
+        orig_aspect = W_orig / H_orig
+        if orig_aspect > target_aspect:
+            crop_h = H_orig
+            crop_w = int(H_orig * target_aspect)
+            start_h = 0
+            start_w = (W_orig - crop_w) // 2
+        else:
+            crop_w = W_orig
+            crop_h = int(W_orig / target_aspect)
+            start_w = 0
+            start_h = (H_orig - crop_h) // 2
 
-        # Resize and normalize
-        video_tensor = torch.stack([resize(frame, (target_h, target_w)) for frame in frames], dim=0)
-        video_tensor = video_tensor.permute(1, 0, 2, 3)   # [C, T, H, W]
-        video_tensor = (video_tensor / 255.0) * 2.0 - 1.0 # Normalize to [-1, 1]
-        return video_tensor                               # Return shape [C, T, H, W]
+        frames = frames[:, :, start_h : start_h + crop_h, start_w : start_w + crop_w]
+        frames = F.interpolate(frames, size=(self.h, self.w), mode='bilinear', align_corners=False, antialias=True)
+        frames = (frames / 255.0) * 2.0 - 1.0
+        video_tensor = frames.permute(1, 0, 2, 3).contiguous()
+        
+        return video_tensor
 
     def _preprocess_audio(self, audio_path: str) -> torch.Tensor:
         waveform, sample_rate = torchaudio.load(audio_path)
@@ -487,14 +491,14 @@ def masks_like(tensor, zero=False, generator=None, p=0.2):
     return out1, out2
 
 if __name__ == '__main__':
-    CSV_PATH = "/videogen/Wan2.2-TI2V-5B-Turbo/data/matrix_audio.csv"
+    CSV_PATH = "/cpfs01/gongshukai/step_distillation/data/matrix_audio_ovi_filtered.csv"
     NUM_FRAMES = 121  # Use a number of frames that matches your CSV, e.g., 63
     TARGET_H = 704   # Example target resolution
     TARGET_W = 1280  # Example target resolution
     AUDIO_SAMPLE_RATE = 16000
     AUDIO_DURATION_SECS = 5
     # DataLoader parameters
-    BATCH_SIZE = 1 # Use a batch size > 1 to test collation
+    BATCH_SIZE = 4 # Use a batch size > 1 to test collation
 
     print("=" * 60)
     print("Testing OviCSVDataset and DataLoader Output...")

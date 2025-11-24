@@ -35,12 +35,12 @@ class OviTextEncoder(torch.nn.Module):
 
         logger.info("Ovi Text Encoder initialized, loading model weights...") if dist.get_rank() == 0 else None
         self.text_encoder.load_state_dict(
-            torch.load(f"/videogen/Ovi/ckpts/{self.model_name}/models_t5_umt5-xxl-enc-bf16.pth",
+            torch.load(f"/cpfs01/gongshukai/weights/Ovi/{self.model_name}/models_t5_umt5-xxl-enc-bf16.pth",
                        map_location='cpu', weights_only=False)
         )
 
         self.tokenizer = HuggingfaceTokenizer(
-            name=f"/videogen/Ovi/ckpts/{self.model_name}/google/umt5-xxl", 
+            name=f"/cpfs01/gongshukai/weights/Ovi/{self.model_name}/google/umt5-xxl", 
             seq_len=512, 
             clean='whitespace'
         )
@@ -74,13 +74,13 @@ class OviVAEWrapper(torch.nn.Module):
         self,
         z_dim_video: int = 48,
         c_dim_video: int = 160,
-        video_vae_pth: str = "/videogen/Ovi/ckpts/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
+        video_vae_pth: str = "/cpfs01/gongshukai/weights/Ovi/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
         dim_mult: List[int] = [1, 2, 4, 4],
         temperal_downsample: List[bool] = [False, True, True],
         
         audio_mode: str = '16k',
-        audio_tod_vae_ckpt: str = "/videogen/Ovi/ckpts/MMAudio/ext_weights/v1-16.pth",
-        audio_bigvgan_ckpt: str = "/videogen/Ovi/ckpts/MMAudio/ext_weights/best_netG.pt",
+        audio_tod_vae_ckpt: str = "/cpfs01/gongshukai/weights/Ovi/MMAudio/ext_weights/v1-16.pth",
+        audio_bigvgan_ckpt: str = "/cpfs01/gongshukai/weights/Ovi/MMAudio/ext_weights/best_netG.pt",
     ):
         super().__init__()
         
@@ -221,7 +221,7 @@ class OviFusionWrapper(torch.nn.Module):
         logger.info(f"Ovi FusionModel initialized, loading model weights...") if dist.get_rank() == 0 else None
 
         original_state_dict = load_file(
-            f"/videogen/Ovi/ckpts/{self.model_name}/model.safetensors", device='cpu'
+            f"/cpfs01/gongshukai/weights/Ovi/{self.model_name}/model.safetensors", device='cpu'
         )
         remapped_state_dict = remap_ovi_state_dict_for_refactored(original_state_dict)
 
@@ -295,56 +295,70 @@ class OviFusionWrapper(torch.nn.Module):
         
         wan22_image_latent: Optional[torch.Tensor] = None,
         mask2: Optional[torch.Tensor] = None,
-        first_frame_is_clean: bool = False, # <--- 保留这个关键标志
+        first_frame_is_clean: bool = False,
         slg_layer: Optional[int] = False,
-        # 移除不再需要的 wan22_input_timestep
         **kwargs 
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        video_prompt_embeds = conditional_dict["video_prompt_embeds"]
-        audio_prompt_embeds = conditional_dict["audio_prompt_embeds"]
         
-        # 准备 FusionModel 的输入 (保持不变)
-        num_frames, c, h, w = video_latent.shape[1:]        # video latent shape: (B, F, C, H, W)
-        # ... (vid_seq_len, audio_seq_len 计算不变) ...
+        video_prompt_embeds = conditional_dict["video_prompt_embeds"] # [B, S, D]
+        audio_prompt_embeds = conditional_dict["audio_prompt_embeds"] # [B, S, D]
+        
+        # --- 1. 准备输入：处理 Batch 维度 ---
+        
+        # Video Latent: [B, F, C, H, W] -> 目标: List of [C, F, H, W]
+        # 这里的 permute 把 C 放到第 1 维: [B, C, F, H, W]
+        # unbind(0) 把 Batch 拆成列表
+        video_input_list = list(video_latent.permute(0, 2, 1, 3, 4).unbind(0))
+        
+        # Audio Latent: [B, L, C] -> 目标: List of [L, C]
+        audio_input_list = list(audio_latent.unbind(0))
+        
+        # Context: [B, S, D] -> List of [S, D]
+        video_context_list = list(video_prompt_embeds.unbind(0))
+        audio_context_list = list(audio_prompt_embeds.unbind(0))
+        
+        # Timestep: [B] (保持原样，FusionModel 会处理)
+        # 如果传入的是 [B, F] 这种，只取第一个维度
+        ts_input = timestep[:, 0] if timestep.dim() > 1 else timestep
+
+        # 计算 seq_len (用于 RoPE 等)
+        num_frames, c, h, w = video_latent.shape[1:]
         _patch_size_h = self.model.video_patch_size[1]
         _patch_size_w = self.model.video_patch_size[2]
         vid_seq_len = num_frames * h * w // (_patch_size_h * _patch_size_w)
         audio_seq_len = audio_latent.shape[1]
         
-        video_input = video_latent.squeeze(0).permute(1, 0, 2, 3)   # video input shape: [C, F, H, W]
-        audio_input = audio_latent.squeeze(0)   # audio input shape: [L, C]
-        video_text_input = video_prompt_embeds.squeeze(0)
-        audio_text_input = audio_prompt_embeds.squeeze(0)
-        timestep = timestep[:, 0] if timestep.dim() > 1 else timestep
-        # 调用底层 FusionModel，只传递简单的 timestep
-        # logger.info(f"Calling FusionModel with timestep shape: {timestep.shape}, values: {timestep}") if dist.get_rank() == 0 else None
-        # logger.info(f"Video input shape: {video_input.shape}, Audio input shape: {audio_input.shape}, Text input shape: {text_input.shape}") if dist.get_rank() == 0 else None
-        flow_pred_video, flow_pred_audio = self.model(
-            vid=[video_input],
-            audio=[audio_input],
-            t=timestep,  # <--- 只传递一个共享的、简单的 timestep
-            vid_context=[video_text_input],
-            audio_context=[audio_text_input],
+        # --- 2. 调用 FusionModel ---
+        # FusionModel 接受 List[Tensor] 作为输入
+        flow_pred_video_list, flow_pred_audio_list = self.model(
+            vid=video_input_list,
+            audio=audio_input_list,
+            t=ts_input,
+            vid_context=video_context_list,
+            audio_context=audio_context_list,
             vid_seq_len=vid_seq_len,
             audio_seq_len=audio_seq_len,
-            first_frame_is_clean=first_frame_is_clean, # <--- 传递标志
+            first_frame_is_clean=first_frame_is_clean,
             slg_layer=slg_layer
         )
 
-        # 恢复 batch 维度 (保持不变)
-        flow_pred_video = flow_pred_video[0].permute(1, 0, 2, 3).unsqueeze(0)   # [1, F, C, H, W]
-        flow_pred_audio = flow_pred_audio[0].unsqueeze(0)   # [1, L, C]
+        # --- 3. 恢复输出维度 ---
         
-        # logger.info(f"flow_pred_video shape: {flow_pred_video.shape}, flow_pred_audio shape: {flow_pred_audio.shape}")
-        # logger.info(f"video_latent shape: {video_latent.shape}, audio_latent shape: {audio_latent.shape}")
-        # 将 flow 转换为 x0
-        x0_pred_video = self._convert_flow_pred_to_x0(flow_pred_video, video_latent, timestep)
-        x0_pred_audio = self._convert_flow_pred_to_x0(flow_pred_audio, audio_latent, timestep)
+        # Video Output: List of [C, F, H, W] -> Stack -> [B, C, F, H, W] -> Permute -> [B, F, C, H, W]
+        # 这里的 permute 是为了和输入的 video_latent [B, F, C, H, W] 对齐
+        flow_pred_video = torch.stack(flow_pred_video_list).permute(0, 2, 1, 3, 4)
+        
+        # Audio Output: List of [L, C] -> Stack -> [B, L, C]
+        flow_pred_audio = torch.stack(flow_pred_audio_list)
+        
+        # --- 4. 转换为 x0 ---
+        x0_pred_video = self._convert_flow_pred_to_x0(flow_pred_video, video_latent, ts_input)
+        x0_pred_audio = self._convert_flow_pred_to_x0(flow_pred_audio, audio_latent, ts_input)
 
-        # logger.info(f"x0_pred_video shape: {x0_pred_video.shape}, x0_pred_audio shape: {x0_pred_audio.shape}")
-        # logger.info(f"mask2 shape: {mask2.shape if mask2 is not None else None}, wan22_image_latent shape: {wan22_image_latent.shape if wan22_image_latent is not None else None}")
-        # 在 x0 上应用图像注入逻辑
+        # --- 5. Mask 处理 ---
         if mask2 is not None and wan22_image_latent is not None:
+            # mask2 shape: [B, F, C, H, W] (需要确保 masks_like 返回了正确的 batch size)
+            # wan22_image_latent shape: [B, 1, C, H, W]
             final_x0_video = (1. - mask2) * wan22_image_latent + mask2 * x0_pred_video
             final_x0_video = final_x0_video.to(video_latent.dtype)
         else:
@@ -405,10 +419,10 @@ if __name__ == "__main__":
     from torch.utils.data import DataLoader
     
     # PROMPT = "The video opens with a wide high-angle shot, looking down over a vast, arid desert landscape. In the immediate foreground, a large, dark brown rock formation partially obscures the view. As the camera pans slightly to the right, the rock formation moves out of the frame, revealing a barren desert valley with a highway running through it. A small, sparse town is visible on the right side of the highway. In the mid-ground, a large, enclosed dirt arena, possibly for a demolition derby, comes into full view. Several battered cars are scattered within the arena, surrounded by a low, yellow barrier. Beyond the arena, there's a large, open lot filled with numerous parked cars, resembling a junkyard or a used car lot. In the far background, a range of large, dark mountains stretches across the horizon under a hazy sky. The overall visual style is realistic."
-    # VIDEO_PATH = "/videogen/audio_preprocess/matrix/video/1fa65cb31263f327a902_114_sdr_4.mp4"
-    # AUDIO_PATH = "/videogen/audio_preprocess/matrix/audio/1fa65cb31263f327a902_114_sdr_4.wav"
-    VIDEO_RECON_PATH = "/videogen/Wan2.2-TI2V-5B-Turbo/data/tmp/recon_video.mp4"
-    AUDIO_RECON_PATH = "/videogen/Wan2.2-TI2V-5B-Turbo/data/tmp/recon_audio.wav"
+    # VIDEO_PATH = "/cpfs01/gongshukai/audio_preprocess/matrix/video/1fa65cb31263f327a902_114_sdr_4.mp4"
+    # AUDIO_PATH = "/cpfs01/gongshukai/audio_preprocess/matrix/audio/1fa65cb31263f327a902_114_sdr_4.wav"
+    VIDEO_RECON_PATH = "/cpfs01/gongshukai/step_distillation/data/tmp/recon_video.mp4"
+    AUDIO_RECON_PATH = "/cpfs01/gongshukai/step_distillation/data/tmp/recon_audio.wav"
 
     # def preprocess_video(video_path, max_pixels=704*1280):
     #     print(f"Preprocessing video from {video_path}...")
@@ -480,7 +494,7 @@ if __name__ == "__main__":
     #     exit()
 
     from dataset import OviCSVDataset
-    CSV_PATH = "/videogen/Wan2.2-TI2V-5B-Turbo/data/matrix_audio.csv"
+    CSV_PATH = "/cpfs01/gongshukai/step_distillation/data/matrix_audio_ovi.csv"
     NUM_FRAMES = 121  # Use a number of frames that matches your CSV, e.g., 63
     TARGET_H = 704   # Example target resolution
     TARGET_W = 1280  # Example target resolution
@@ -614,11 +628,11 @@ if __name__ == "__main__":
         print(f"✓ Audio recon shape: {audio_recon.shape}, dtype: {audio_recon.dtype}")
         audio_recon = audio_recon.squeeze(0)
 
-        # 保存视频、音频到/videogen/Wan2.2-TI2V-5B-Turbo/data/tmp
-        os.makedirs("/videogen/Wan2.2-TI2V-5B-Turbo/data/tmp", exist_ok=True)
+        # 保存视频、音频到/cpfs01/gongshukai/step_distillation/data/tmp
+        os.makedirs("/cpfs01/gongshukai/step_distillation/data/tmp", exist_ok=True)
         save_video(video_recon, VIDEO_RECON_PATH, fps=24)
         save_audio(audio_recon, AUDIO_RECON_PATH, sample_rate=16000)
-        print(f"✓ Reconstructed video and audio saved to /videogen/Wan2.2-TI2V-5B-Turbo/data/tmp/")
+        print(f"✓ Reconstructed video and audio saved to /cpfs01/gongshukai/step_distillation/data/tmp/")
     except Exception as e:
         print(f"✗ Error: {e}")
         import traceback

@@ -4,10 +4,10 @@ model_name: Ovi
 
 # --- 选择推理模式 ---
 # 1. 用于原始Ovi模型: 指定 inference_steps, Use UniPC for sampling
-# inference_steps: 50
+inference_steps: 50
 # 2. 用于蒸馏后的Ovi模型: 注释掉 inference_steps，并使用下面的 denoising_step_list
-denoising_step_list: [1000, 750, 500, 250]
-warp_denoising_step: true # 当使用 denoising_step_list 时设为 true
+# denoising_step_list: [1000, 750, 500, 250]
+# warp_denoising_step: true # 当使用 denoising_step_list 时设为 true
 
 # --- CFG 和采样器参数 ---
 timestep_shift: 5.0

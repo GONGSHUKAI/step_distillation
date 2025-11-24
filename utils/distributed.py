@@ -122,7 +122,7 @@ class EMA_FSDP:
     def update(self, fsdp_module):
         d = self.decay
         from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-        with FSDP.summon_full_params(fsdp_module, writeback=False, offload_to_cpu=True):
+        with FSDP.summon_full_params(fsdp_module, writeback=False, offload_to_cpu=False):
             for n, p in fsdp_module.module.named_parameters():
                 self.shadow[n].mul_(d).add_(p.detach().float().cpu(), alpha=1. - d)
 

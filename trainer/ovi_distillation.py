@@ -66,8 +66,10 @@ class Trainer: # MODIFIED: Renamed class
             state_dict = torch.load(pretrained_ckpt_path, map_location="cpu")
             self.model.generator.load_state_dict(state_dict["generator"], strict=True)
             self.model.fake_score.load_state_dict(state_dict["critic"], strict=True)
+            state_dict_ema = state_dict["generator_ema"] if "generator_ema" in state_dict else None
         else:
             logger.info("No checkpoint found, training from scratch.") if self.is_main_process else None
+            state_dict_ema = None
 
         self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
 
@@ -157,7 +159,11 @@ class Trainer: # MODIFIED: Renamed class
             audio_duration_secs=config.audio_duration_secs,
         )
         sampler = OffsetDistributedSampler(dataset, initial_step=self.step, gpu_num=self.world_size, shuffle=False, drop_last=True)
-        dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.batch_size, sampler=sampler, num_workers=8)
+        dataloader = torch.utils.data.DataLoader(dataset, 
+                                                 batch_size=config.batch_size, sampler=sampler, 
+                                                 num_workers=4, 
+                                                 prefetch_factor=2, # pin_memory=True
+                                                 )
         self.dataloader = cycle(dataloader)
         logger.info(f"Finished setting up dataset and dataloader, dataset size: {len(dataset)}.") if self.is_main_process else None
         
@@ -185,10 +191,9 @@ class Trainer: # MODIFIED: Renamed class
             
             # Load EMA state dict if available in checkpoint
             if pretrained_ckpt_path is not None:
-                checkpoint_state_dict = torch.load(pretrained_ckpt_path, map_location="cpu")
-                if "generator_ema" in checkpoint_state_dict:
-                    logger.info("Loading generator_ema from checkpoint")
-                    self.generator_ema.load_state_dict(checkpoint_state_dict["generator_ema"])
+                if state_dict_ema is not None:
+                    logger.info("Loading generator_ema from checkpoint") if self.is_main_process else None
+                    self.generator_ema.load_state_dict(state_dict_ema)
                 else:
                     logger.info("No generator_ema found in checkpoint, starting fresh EMA")
         logger.info("Finished setting up EMA parameters.") if self.is_main_process else None
@@ -351,7 +356,6 @@ class Trainer: # MODIFIED: Renamed class
         # --- MODIFIED FOR OVI LOGGING ---
         start_step = self.step
         while True:
-            logger.info(f"training step {self.step} ...") if self.is_main_process else None
             TRAIN_GENERATOR = self.step % self.config.dfake_gen_update_ratio == 0
 
             # Train Generator
