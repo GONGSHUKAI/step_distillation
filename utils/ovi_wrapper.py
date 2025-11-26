@@ -29,7 +29,7 @@ class OviTextEncoder(torch.nn.Module):
         self.text_encoder = umt5_xxl(
             encoder_only=True,
             return_tokenizer=False,
-            dtype=torch.float32,
+            dtype=torch.bfloat16,   # dtype=torch.float32
             device=torch.device('cpu')
         ).eval().requires_grad_(False)
 
@@ -221,7 +221,7 @@ class OviFusionWrapper(torch.nn.Module):
         logger.info(f"Ovi FusionModel initialized, loading model weights...") if dist.get_rank() == 0 else None
 
         original_state_dict = load_file(
-            f"/cpfs01/gongshukai/weights/Ovi/{self.model_name}/model.safetensors", device='cpu'
+            f"/cpfs01/gongshukai/weights/Ovi/{self.model_name}/model_960x960.safetensors", device='cpu'
         )
         remapped_state_dict = remap_ovi_state_dict_for_refactored(original_state_dict)
 

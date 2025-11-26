@@ -14,6 +14,6 @@ torchrun \
     train.py \
     --config_path configs/self_forcing_ovi_dmd_lr_2e-6_lr_critic_4e-7.yaml \
     --logdir $LOGDIR \
-    --data_path data/matrix_audio_ovi_filtered.csv \
+    --data_path data/matrix_audio_ovi.csv \
     --no_visualize \
     # --disable-wandb

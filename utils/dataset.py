@@ -428,9 +428,7 @@ class OviCSVDataset(Dataset):
         if waveform.shape[1] > self.target_audio_length:
             waveform = waveform[:, :self.target_audio_length]
         else:
-            waveform_len = waveform.shape[1]
-            waveform_len = waveform_len // 512 * 512
-            waveform = waveform[:, :waveform_len]
+            waveform = F.pad(waveform, (0, self.target_audio_length - waveform.shape[1]), mode='constant', value=0)
             
         return waveform.squeeze(0)  # Return shape [L]
     
@@ -491,7 +489,7 @@ def masks_like(tensor, zero=False, generator=None, p=0.2):
     return out1, out2
 
 if __name__ == '__main__':
-    CSV_PATH = "/cpfs01/gongshukai/step_distillation/data/matrix_audio_ovi_filtered.csv"
+    CSV_PATH = "/cpfs01/gongshukai/step_distillation/data/matrix_audio_ovi.csv"
     NUM_FRAMES = 121  # Use a number of frames that matches your CSV, e.g., 63
     TARGET_H = 704   # Example target resolution
     TARGET_W = 1280  # Example target resolution

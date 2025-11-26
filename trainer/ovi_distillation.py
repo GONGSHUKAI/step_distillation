@@ -67,11 +67,15 @@ class Trainer: # MODIFIED: Renamed class
             self.model.generator.load_state_dict(state_dict["generator"], strict=True)
             self.model.fake_score.load_state_dict(state_dict["critic"], strict=True)
             state_dict_ema = state_dict["generator_ema"] if "generator_ema" in state_dict else None
+            # Free memory
+            del state_dict  
+            gc.collect()
+            torch.cuda.empty_cache()
         else:
             logger.info("No checkpoint found, training from scratch.") if self.is_main_process else None
             state_dict_ema = None
 
-        self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
+        # self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
 
         # FSDP Wrapping
         logger.info("Wrapping model components with FSDP...") if self.is_main_process else None
@@ -162,7 +166,9 @@ class Trainer: # MODIFIED: Renamed class
         dataloader = torch.utils.data.DataLoader(dataset, 
                                                  batch_size=config.batch_size, sampler=sampler, 
                                                  num_workers=4, 
-                                                 prefetch_factor=2, # pin_memory=True
+                                                 prefetch_factor=2, 
+                                                 pin_memory=True,
+                                                 persistent_workers=True,
                                                  )
         self.dataloader = cycle(dataloader)
         logger.info(f"Finished setting up dataset and dataloader, dataset size: {len(dataset)}.") if self.is_main_process else None
@@ -194,6 +200,9 @@ class Trainer: # MODIFIED: Renamed class
                 if state_dict_ema is not None:
                     logger.info("Loading generator_ema from checkpoint") if self.is_main_process else None
                     self.generator_ema.load_state_dict(state_dict_ema)
+                    del state_dict_ema  # Free memory
+                    gc.collect()
+                    torch.cuda.empty_cache()
                 else:
                     logger.info("No generator_ema found in checkpoint, starting fresh EMA")
         logger.info("Finished setting up EMA parameters.") if self.is_main_process else None
@@ -287,7 +296,7 @@ class Trainer: # MODIFIED: Renamed class
         # Step 1: Get batch of (text, video, audio)
         text_prompts = batch["prompts"]
         video_tensor = batch["video"].to(device=self.device, dtype=self.dtype)      # shape: [B, C, F, H, W]
-        audio_tensor = batch["audio"].to(device=self.device, dtype=self.dtype)      # shape: [B, L]
+        # audio_tensor = batch["audio"].to(device=self.device, dtype=self.dtype)      # shape: [B, L]
 
         # Step 2: Encode inputs to latents
         with torch.no_grad():
