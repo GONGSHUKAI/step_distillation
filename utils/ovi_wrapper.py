@@ -6,6 +6,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from typing import List, Dict, Tuple, Optional, Union
 import logging
+import random
 
 # from ovi.modules.fusion import FusionModel
 from ovi.modules.ovi import FusionModel
@@ -15,8 +16,11 @@ from ovi.modules.mmaudio.features_utils import FeaturesUtils
 from ovi.modules.tokenizers import HuggingfaceTokenizer
 
 from utils.scheduler import SchedulerInterface, FlowMatchScheduler
+from utils.sde_util import sde_step_with_logprob
+from utils.dataset import masks_like
 from safetensors.torch import load_file
 import math
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +205,7 @@ class OviFusionWrapper(torch.nn.Module):
     def __init__(
         self, 
         model_name: str = "Ovi",
+        model_path: Optional[str] = None,
         video_config_path: str = "ovi/configs/model/dit/video.json",
         audio_config_path: str = "ovi/configs/model/dit/audio.json",
         is_causal: bool = False,
@@ -218,11 +223,14 @@ class OviFusionWrapper(torch.nn.Module):
 
         logger.info(f"Initializing Ovi FusionModel: {self.video_config['num_layers']} video blocks and {self.audio_config['num_layers']} audio blocks...") if dist.get_rank() == 0 else None
         self.model = FusionModel(self.video_config, self.audio_config).to(dtype=torch.bfloat16, device=torch.device('cpu'))
-        logger.info(f"Ovi FusionModel initialized, loading model weights...") if dist.get_rank() == 0 else None
 
-        original_state_dict = load_file(
-            f"/cpfs01/gongshukai/weights/Ovi/{self.model_name}/model_960x960.safetensors", device='cpu'
-        )
+        if model_path is not None:
+            logger.info(f"Ovi FusionModel initialized, loading model weights from {model_path}...") if dist.get_rank() == 0 else None
+            original_state_dict = load_file(model_path, device='cpu')
+        else:
+            model_path = f"/cpfs01/gongshukai/weights/Ovi/{self.model_name}/model_960x960.safetensors"
+            logger.info(f"Ovi FusionModel initialized, loading model weights from {model_path}...") if dist.get_rank() == 0 else None
+            original_state_dict = load_file(model_path, device='cpu')
         remapped_state_dict = remap_ovi_state_dict_for_refactored(original_state_dict)
 
         missing_keys, unexpected_keys = self.model.load_state_dict(remapped_state_dict, strict=False)

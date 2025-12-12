@@ -72,12 +72,15 @@ class CausalInferencePipeline(torch.nn.Module):
             # noise should still be a multiple of num_frame_per_block
             assert num_frames % self.num_frame_per_block == 0
             num_blocks = num_frames // self.num_frame_per_block
+            print(f"independent_first_frame: {self.independent_first_frame}, initial_latent is not None: {initial_latent is not None}, num_blocks: {num_blocks}, num_frames: {num_frames}, num_frame_per_block: {self.num_frame_per_block}")
         else:
             # Using a [1, 4, 4, 4, 4, 4, ...] model to generate a video without image conditioning
             assert (num_frames - 1) % self.num_frame_per_block == 0
             num_blocks = (num_frames - 1) // self.num_frame_per_block
+            print(f"independent_first_frame: {self.independent_first_frame}, initial_latent is None: {initial_latent is None}, num_blocks: {num_blocks}, num_frames: {num_frames}, num_frame_per_block: {self.num_frame_per_block}")
         num_input_frames = initial_latent.shape[1] if initial_latent is not None else 0
         num_output_frames = num_frames + num_input_frames  # add the initial latent frames
+        print(f"num_input_frames: {num_input_frames}, num_output_frames: {num_output_frames}")
         conditional_dict = self.text_encoder(
             text_prompts=text_prompts
         )

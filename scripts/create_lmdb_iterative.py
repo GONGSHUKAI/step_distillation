@@ -34,7 +34,7 @@ def main():
 
     seen_prompts = set()  # for deduplication
 
-    for index, file in tqdm(enumerate(all_files)):
+    for index, file in tqdm(enumerate(all_files), total=len(all_files), desc="Processing files"):
         # read from disk
         data_dict = torch.load(file)
 
@@ -47,7 +47,7 @@ def main():
     # save each entry's shape to lmdb
     with env.begin(write=True) as txn:
         for key, val in data_dict.items():
-            print(key, val)
+            # print(key, val)
             array_shape = np.array(val.shape)
             array_shape[0] = counter
 

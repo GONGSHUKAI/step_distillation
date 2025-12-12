@@ -1,105 +1,93 @@
 <p align="center">
-<h1 align="center">Wan2.2-TI2V-5B-Turbo</h1>
-<a href="https://github.com/quanhaol/Wan2.2-TI2V-5B-Turbo"><img src="https://img.shields.io/badge/GitHub-Repository-0066cc.svg" alt="GitHub"></a>
-<a href="https://huggingface.co/quanhaol/Wan2.2-TI2V-5B-Turbo"><img src="https://img.shields.io/badge/🤗_HuggingFace-Model-ffbd45.svg" alt="HuggingFace"></a>
-<a href="https://huggingface.co/datasets/quanhaol/MagicData"><img src="https://img.shields.io/badge/🤗_HuggingFace-Dataset-ffbd45.svg" alt="HuggingFace"></a>
+<h1 align="center">StreamingT2AV</h1>
+<a href="https://github.com/GONGSHUKAI/step_distillation"><img src="https://img.shields.io/badge/GitHub-Repository-0066cc.svg" alt="GitHub"></a>
+<!-- <a href="https://huggingface.co/quanhaol/Wan2.2-TI2V-5B-Turbo"><img src="https://img.shields.io/badge/🤗_HuggingFace-Model-ffbd45.svg" alt="HuggingFace"></a>
+<a href="https://huggingface.co/datasets/quanhaol/MagicData"><img src="https://img.shields.io/badge/🤗_HuggingFace-Dataset-ffbd45.svg" alt="HuggingFace"></a> -->
 
-Wan2.2-TI2V-5B-Turbo is designed for efficient step distillation and CFG distillation based on <a href="https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B"><b>Wan2.2-TI2V-5B</b></a>. 
-
-Leveraging the Self-Forcing framework, it enables 4-step TI2V-5B model training. **Our model can generate 121-frame videos at 24 FPS with a resolution of 1280×704 in just 4 steps, eliminating the need for the CFG trick.**
-
-To the best of our knowledge, Wan2.2-TI2V-5B-Turbo is the **first** open-source repository of the distilled I2V version of Wan2.2-TI2V-5B.
-
-## 🔥Video Demos
-The videos below can be reproduced using [examples/example.csv](examples/example.csv).
-
-<table border="0" style="width: 100%; text-align: left; margin-top: 20px;">
-  <tr>
-      <td>
-          <video src="https://github.com/user-attachments/assets/dae5045c-c7a0-4e99-aa1c-e07d2300ea1c" width="100%" controls loop></video>
-      </td>
-      <td>
-          <video src="https://github.com/user-attachments/assets/f6d66a0e-eb8b-4b69-a29f-9d9607c02dda" width="100%" controls loop></video>
-      </td>
-  </tr>
-  <tr>
-      <td>
-          <video src="https://github.com/user-attachments/assets/0adc81ad-0389-4a06-b362-1078e5b4b564" width="100%" controls loop></video>
-      </td>
-      <td>
-          <video src="https://github.com/user-attachments/assets/dcf860c4-1da7-469c-bd88-0ab8641d400a" width="100%" controls loop></video>
-      </td>
-  </tr>
-  <tr>
-      <td>
-          <video src="https://github.com/user-attachments/assets/c5478230-2093-4443-8d76-f845675a4331" width="100%" controls loop></video>
-      </td>
-      <td>
-          <video src="https://github.com/user-attachments/assets/661daf97-aff3-4c5d-8912-44696a86a24e" width="100%" controls loop></video>
-      </td>
-  </tr>
-</table>
-
-## 📣 Updates
-- `2025/08/06` 🔥Wan2.2-TI2V-5B-Turbo has been released [`here`](https://huggingface.co/quanhaol/Wan2.2-TI2V-5B-Turbo).
-
-## 🐍 Installation
-Create a conda environment and install dependencies:
+## 配置环境
 ```bash
-conda create -n wanturbo python=3.10 -y
-conda activate wanturbo
+conda create -n mediagen python=3.10 -y
+conda activate mediagen
+# 建议先安装除了flash-attn之外的所有依赖包，然后再安装flash-attn。
 pip install -r requirements.txt
-pip install flash-attn --no-build-isolation
-python setup.py develop
+pip install flash-attn==2.7.3 --use-pep517 --no-build-isolation
 ```
 
-## 🚀Quick Start
+## 下载权重
 
-### Checkpoint Download
-
+和Ovi-DMD相关的权重
 ```bash
-pip install "huggingface_hub[hf_transfer]"
-HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download Wan-AI/Wan2.2-TI2V-5B --local-dir wan_models/Wan2.2-TI2V-5B
-HF_HUB_ENABLE_HF_TRANSFER=1 huggingface-cli download quanhaol/Wan2.2-TI2V-5B-Turbo --local-dir wan_models/Wan2.2-TI2V-5B-Turbo
+export HF_ENDPOINT=https://hf-mirror.com
+# 下载和Ovi有关的权重, 会下载下来 Ovi 的权重 (但我们不会用到960*960和960*960_10s的ckpt), MMAudio 和 Wan2.2-TI2V-5B
+python ovi_weight_download.py
 ```
 
-### DMD Training 
+## 调整一些路径
+有一些路径我都为了方便起见写成了绝对路径，需要修改一下，以下列出了一些（如果还有哪里没有列出的话可以运行的时候排查一下）
+
+1. 配置文件: `configs/`和`configs/inference`底下的`.yaml`文件
+2. 运行脚本：`running_scripts/train`和`running_scripts/inference`底下的各种`.sh`文件
+3. 代码文件：`scripts/visualize_ode_pairs.py`, `utils/ovi_wrapper.py`, `utils/wan_wrapper.py`, `utils/ovi_wrapper_inference.py`, `utils/dataset.py`
+
+## Ovi-DMD
+### 训练
+加载原始的Ovi权重，训练成4步推理的Ovi-DMD模型。
+
+权重保存路径、使用的配置文件、训练用的prompt+参考帧数据集见`.sh`脚本
 ```bash
-bash running_scripts/train/Wan2.2/dmd.sh
+cd step_distillation
+bash running_scripts/train/ovi_dmd_lr_2e-6_lr_critic_4e-7_smallcfg_720ckpt.sh
 ```
-The model was trained for 4,000 iterations under 48 hours using a cluster of 16 A100 GPUs.
+### 推理
+这是对训好的4步Ovi-DMD进行推理的脚本。
 
-### Fewstep Inference
+推理的保存结果、使用的配置文件、用来生成视频的prompt+参考帧数据集见`.sh`脚本
 ```bash
-bash running_scripts/inference/Wan2.2/i2v_fewstep.sh
+cd step_distillation
+bash running_scripts/inference/i2av_fewstep_4000step.sh
 ```
 
-## 🤝 Acknowledgements
+## 其他：复现Self-Forcing相关
 
-We would like to express our gratitude to the following open-source projects that have been instrumental in the development of our project:
+如果你想要复现一下Self-Forcing的话，跟着Self-Forcing的readme下载一些诸如Wan2.1-T2V-1.3B，Self-Forcing训好的ODE_init.pt等等。这个codebase也能跑通Wan2.1-T2V-1.3B的Self-Forcing的训练和推理。
 
-- [MagicMotion](https://github.com/quanhaol/MagicMotion)
-- [CausVid](https://github.com/tianweiy/CausVid)
-- [Self-Forcing](https://github.com/guandeh17/Self-Forcing)
-- [Self-Forcing-Plus](https://github.com/GoatWu/Self-Forcing-Plus)
-- [Wan2.1](https://github.com/Wan-Video/Wan2.1)
-- [Wan2.2](https://github.com/Wan-Video/Wan2.2)
+### 下载Wan2.1-T2V-1.3B(Student模型、Critic模型)，Wan2.1-T2V-14B(Teacher模型)和Self-Forcing的ODE初始化权重
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+huggingface-cli download Wan-AI/Wan2.1-T2V-1.3B --local-dir /your/path/to/Wan2.1-T2V-1.3B
+huggingface-cli download Wan-AI/Wan2.1-T2V-14B --local-dir /your/path/to/Wan2.1-T2V-14B
+huggingface-cli download gdhe17/Self-Forcing checkpoints/ode_init.pt --local-dir /your/path/to/ode_init
+```
 
-Special thanks to the contributors of these libraries for their hard work and dedication!
+### ODE 预训练
+#### ODE Pair的生成
+记得修改里面的绝对路径
+```bash
+export PYTHONPATH=$PYTHONPATH:/cpfs01/gongshukai/step_distillation
 
-## 📚 Contact
+# 第一步: 生成ODE pairs
+torchrun \
+    --nproc_per_node 8 \
+    scripts/generate_ode_pairs.py \
+    --output_folder /cpfs01/gongshukai/step_distillation/ode_init/mixkit_ode \
+    --caption_path /cpfs01/gongshukai/CausVid/sample_dataset/mixkit_prompts.txt
 
-If you have any suggestions or find our work helpful, feel free to contact us
+# 可视化生成的ODE pairs
+PYTHONPATH=. python scripts/visualize_ode_pairs.py 
 
-Email: liqh24@m.fudan.edu.cn or zhenxingfd@gmail.com or wangrui21@m.fudan.edu.cn
+# 第二步: 把生成的ODE pairs打包成LMDB数据集
+# [注]: LMDB (Lightweight Database) 可以高效地存储和检索大规模数据
+PYTHONPATH=. python scripts/create_lmdb_iterative.py --data_path /cpfs01/gongshukai/step_distillation/ode_init/mixkit_ode --lmdb_path /cpfs01/gongshukai/step_distillation/ode_init/mixkit_ode_lmdb
+```
 
-If you find our work useful, <b>please consider giving a star to this github repository and citing it</b>:
+#### ODE预训练
+记得修改里面的绝对路径
+```bash
+bash ode_init/ode_pretraining.sh
+```
 
-```bibtex
-@article{li2025magicmotion,
-  title={MagicMotion: Controllable Video Generation with Dense-to-Sparse Trajectory Guidance},
-  author={Li, Quanhao and Xing, Zhen and Wang, Rui and Zhang, Hui and Dai, Qi and Wu, Zuxuan},
-  journal={arXiv preprint arXiv:2503.16421},
-  year={2025}
-}
+### Self-Forcing训练
+这里你可以使用自己生成的ODE pairs训练出来的权重，也可以用Self-Forcing给的ODE初始化权重，这个可以在配置文件`configs/self_forcing_dmd.yaml`中调整，修改`generator_ckpt`字段即可。记得修改里面的绝对路径。
+```bash
+bash running_scripts/train/self_forcing_dmd.sh
 ```

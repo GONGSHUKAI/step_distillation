@@ -453,6 +453,116 @@ class OviCSVDataset(Dataset):
                 "video": torch.zeros((3, self.num_frames, self.h, self.w)),
                 "audio": torch.zeros((1, self.target_audio_length)),
             }
+
+class OviCSVImageVideoDataset(Dataset):
+    def __init__(
+        self,
+        data_path: str,
+        num_frames: int = 121,
+        h: int = 704,
+        w: int = 1280,
+        audio_sample_rate: int = 16000, # 保留参数接口以兼容Config，但不实际加载音频
+        audio_duration_secs: int = 5,   # 保留参数接口以兼容Config
+    ):
+        self.data = pd.read_csv(data_path)
+        self.data["text"] = self.data["text"].fillna("")
+        self.num_frames = num_frames
+        self.h = h
+        self.w = w
+        
+        self.audio_sample_rate = audio_sample_rate
+        self.audio_duration_secs = audio_duration_secs
+
+        self.log_file = "log/ovi_dataset_error_log.txt"
+        os.makedirs(os.path.dirname(self.log_file), exist_ok=True)
+        self.image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff'}
+
+    def __len__(self):
+        return len(self.data)
+
+    def _process_visual(self, file_path: str) -> torch.Tensor:
+        """
+        读取视频首帧或图片，并进行Center Crop + Resize + Normalize。
+        返回: [3, 1, H, W]
+        """
+        path = Path(file_path)
+        ext = path.suffix.lower()
+        
+        if ext in self.image_extensions:
+            try:
+                img = Image.open(file_path).convert("RGB")
+                # 转为 Tensor [3, H, W], 范围 [0, 255] (uint8) 或者 [0, 1] (float) depending on implementation
+                # 这里我们统一用 TF.to_tensor 转为 [0, 1] float
+                pixel_values = TF.to_tensor(img) # [3, H, W]
+            except Exception as e:
+                raise RuntimeError(f"Failed to load image {file_path}: {e}")
+        else:
+            try:
+                video_reader = decord.VideoReader(uri=path.as_posix(), num_threads=1)
+                frame = video_reader[0].asnumpy() # [H, W, C]
+                pixel_values = torch.from_numpy(frame).permute(2, 0, 1).float() / 255.0 # [3, H, W], [0, 1]
+            except Exception as e:
+                raise RuntimeError(f"Failed to load video first frame {file_path}: {e}")
+
+        # 2. Crop & Resize 逻辑
+        C, H_orig, W_orig = pixel_values.shape
+        target_aspect = self.w / self.h
+        orig_aspect = W_orig / H_orig
+
+        if orig_aspect > target_aspect:
+            crop_h = H_orig
+            crop_w = int(H_orig * target_aspect)
+            start_h = 0
+            start_w = (W_orig - crop_w) // 2
+        else:
+            crop_w = W_orig
+            crop_h = int(W_orig / target_aspect)
+            start_w = 0
+            start_h = (H_orig - crop_h) // 2
+        
+        # Crop
+        pixel_values = pixel_values[:, start_h : start_h + crop_h, start_w : start_w + crop_w]
+        
+        # Resize (必须增加 batch 维度才能用 interpolate: [1, 3, H, W])
+        pixel_values = F.interpolate(
+            pixel_values.unsqueeze(0), 
+            size=(self.h, self.w), 
+            mode='bilinear', 
+            align_corners=False, 
+            antialias=True
+        ).squeeze(0)
+
+        # 3. Normalize to [-1, 1]
+        pixel_values = (pixel_values - 0.5) * 2.0
+        
+        # 4. Add Time Dimension: [3, H, W] -> [3, 1, H, W]
+        return pixel_values.unsqueeze(1).contiguous()
+
+    def __getitem__(self, index):
+        sample = self.data.iloc[index]
+        try:
+            # 智能判断是图片路径还是视频路径
+            visual_path = sample["video_path"]
+            # 有些CSV可能图片在image字段，做个兼容（可选）
+            if pd.isna(visual_path) or visual_path == "":
+                if "image" in sample and not pd.isna(sample["image"]):
+                    visual_path = sample["image"]
+            
+            first_frame = self._process_visual(visual_path)
+            
+            return {
+                "prompts": sample["text"],
+                "first_frame": first_frame, # [3, 1, H, W]
+            }
+        except Exception as e:
+            with open(self.log_file, "a") as f:
+                f.write(f"Error at index {index} (path: {sample.get('video_path', 'N/A')}): {str(e)}\n")
+            
+            # Return a placeholder to prevent crash
+            return {
+                "prompts": "placeholder error prompt",
+                "first_frame": torch.zeros((3, 1, self.h, self.w)),
+            }
         
 def cycle(dl):
     while True:
@@ -489,22 +599,109 @@ def masks_like(tensor, zero=False, generator=None, p=0.2):
     return out1, out2
 
 if __name__ == '__main__':
-    CSV_PATH = "/cpfs01/gongshukai/step_distillation/data/matrix_audio_ovi.csv"
+    # CSV_PATH = "/cpfs01/gongshukai/step_distillation/data/ovi_dataset.csv"
+    # NUM_FRAMES = 121  # Use a number of frames that matches your CSV, e.g., 63
+    # TARGET_H = 704   # Example target resolution
+    # TARGET_W = 1280  # Example target resolution
+    # AUDIO_SAMPLE_RATE = 16000
+    # AUDIO_DURATION_SECS = 5
+    # # DataLoader parameters
+    # BATCH_SIZE = 4 # Use a batch size > 1 to test collation
+
+    # print("=" * 60)
+    # print("Testing OviCSVDataset and DataLoader Output...")
+    # print("=" * 60)
+
+    # # 1. Instantiate the dataset
+    # try:
+    #     dataset = OviCSVDataset(
+    #         data_path=CSV_PATH,
+    #         num_frames=NUM_FRAMES,
+    #         h=TARGET_H,
+    #         w=TARGET_W,
+    #         audio_sample_rate=AUDIO_SAMPLE_RATE,
+    #         audio_duration_secs=AUDIO_DURATION_SECS,
+    #     )
+    #     print(f"✓ Dataset initialized successfully with {len(dataset)} samples.")
+    # except Exception as e:
+    #     print(f"✗ Error initializing dataset: {e}")
+    #     print("  Please ensure the CSV file exists at the specified path and is correctly formatted.")
+    #     exit()
+
+    # # 2. Create a DataLoader
+    # data_loader = DataLoader(
+    #     dataset,
+    #     batch_size=BATCH_SIZE,
+    #     shuffle=True,
+    #     num_workers=0 # Set to 0 for simple testing, can be increased for performance
+    # )
+    # print(f"✓ DataLoader created with batch size {BATCH_SIZE}.")
+
+    # # 3. Fetch and inspect one batch
+    # try:
+    #     print("\nFetching one batch...")
+    #     batch = next(iter(data_loader))
+    #     print("✓ Batch fetched successfully.")
+
+    #     # 4. Verify the contents and shapes
+    #     print("\n--- Batch Content Verification ---")
+    #     video_tensor = batch["video"]
+    #     audio_tensor = batch["audio"]
+    #     prompts = batch["prompts"]
+
+    #     print(f"  - Prompts:")
+    #     print(f"    - Type: {type(prompts)}")
+    #     print(f"    - Length: {len(prompts)} (should match batch size of {BATCH_SIZE})")
+    #     print(f"    - Example prompt: '{prompts[0][:80]}...'")
+
+    #     print(f"\n  - Video Tensor:")
+    #     print(f"    - Shape: {video_tensor.shape}")
+    #     print(f"    - Dtype: {video_tensor.dtype}")
+    #     print(f"    - Value Range: min={video_tensor.min():.2f}, max={video_tensor.max():.2f} (should be approx. [-1, 1])")
+        
+    #     # Assertions to confirm the shape is correct for the model VAE
+    #     assert len(video_tensor.shape) == 5, f"Video tensor should have 5 dimensions, but got {len(video_tensor.shape)}"
+    #     assert video_tensor.shape[0] == BATCH_SIZE, f"Video batch size is incorrect, expected {BATCH_SIZE}"
+    #     assert video_tensor.shape[1] == 3, "Video should have 3 channels (RGB)"
+    #     print("    - Shape is valid for VAE input.")
+
+    #     print(f"\n  - Audio Tensor:")
+    #     print(f"    - Shape: {audio_tensor.shape}")
+    #     print(f"    - Dtype: {audio_tensor.dtype}")
+        
+    #     # Assertions to confirm the shape is correct
+    #     assert len(audio_tensor.shape) == 2, f"Audio tensor should have 2 dimensions, but got {len(audio_tensor.shape)}"
+    #     assert audio_tensor.shape[0] == BATCH_SIZE, f"Audio batch size is incorrect, expected {BATCH_SIZE}"
+    #     print("    - Shape is valid for VAE input.")
+
+    #     print("\n\033[92m✓ Batch shapes and dtypes are correct and match the requirements for the Ovi model.\033[0m")
+
+
+    # except StopIteration:
+    #     print("✗ DataLoader is empty. This might happen if the CSV is empty or cannot be read.")
+    # except Exception as e:
+    #     print(f"✗ An error occurred while fetching or inspecting the batch: {e}")
+    #     import traceback
+    #     traceback.print_exc()
+
+    # print("\n" + "=" * 60)
+    # print("Test completed.")
+    # print("=" * 60)
+
+    CSV_PATH = "/cpfs01/gongshukai/step_distillation/data/ovi_dataset.csv"
     NUM_FRAMES = 121  # Use a number of frames that matches your CSV, e.g., 63
     TARGET_H = 704   # Example target resolution
     TARGET_W = 1280  # Example target resolution
     AUDIO_SAMPLE_RATE = 16000
     AUDIO_DURATION_SECS = 5
     # DataLoader parameters
-    BATCH_SIZE = 4 # Use a batch size > 1 to test collation
-
+    BATCH_SIZE = 10 # Use a batch size > 1 to test collation
     print("=" * 60)
-    print("Testing OviCSVDataset and DataLoader Output...")
+    print("Testing OviCSVImageVideoDataset and DataLoader Output...")
     print("=" * 60)
-
     # 1. Instantiate the dataset
     try:
-        dataset = OviCSVDataset(
+        dataset = OviCSVImageVideoDataset(
             data_path=CSV_PATH,
             num_frames=NUM_FRAMES,
             h=TARGET_H,
@@ -526,54 +723,44 @@ if __name__ == '__main__':
         num_workers=0 # Set to 0 for simple testing, can be increased for performance
     )
     print(f"✓ DataLoader created with batch size {BATCH_SIZE}.")
-
     # 3. Fetch and inspect one batch
     try:
-        print("\nFetching one batch...")
-        batch = next(iter(data_loader))
-        print("✓ Batch fetched successfully.")
+        for idx, batch in enumerate(data_loader):
+            print("\n--- Batch Content Verification ---")
+            first_frame = batch["first_frame"]
+            prompts = batch["prompts"]
 
-        # 4. Verify the contents and shapes
-        print("\n--- Batch Content Verification ---")
-        video_tensor = batch["video"]
-        audio_tensor = batch["audio"]
-        prompts = batch["prompts"]
+            print(f"  - Prompts:")
+            print(f"    - Type: {type(prompts)}")
+            print(f"    - Length: {len(prompts)} (should match batch size of {BATCH_SIZE})")
+            print(f"    - Example prompt: '{prompts[0][:80]}...'")
 
-        print(f"  - Prompts:")
-        print(f"    - Type: {type(prompts)}")
-        print(f"    - Length: {len(prompts)} (should match batch size of {BATCH_SIZE})")
-        print(f"    - Example prompt: '{prompts[0][:80]}...'")
+            print(f"\n  - First Frame Tensor:")
+            print(f"    - Shape: {first_frame.shape}")
+            print(f"    - Dtype: {first_frame.dtype}")
+            print(f"    - Value Range: min={first_frame.min():.2f}, max={first_frame.max():.2f} (should be approx. [-1, 1])")
+            
+            # Assertions to confirm the shape is correct for the model VAE
+            assert len(first_frame.shape) == 5, f"First frame tensor should have 5 dimensions, but got {len(first_frame.shape)}"
+            assert first_frame.shape[0] == BATCH_SIZE, f"First frame batch size is incorrect, expected {BATCH_SIZE}"
+            assert first_frame.shape[1] == 3, "First frame should have 3 channels (RGB)"
+            print("    - Shape is valid for VAE input.")
 
-        print(f"\n  - Video Tensor:")
-        print(f"    - Shape: {video_tensor.shape}")
-        print(f"    - Dtype: {video_tensor.dtype}")
-        print(f"    - Value Range: min={video_tensor.min():.2f}, max={video_tensor.max():.2f} (should be approx. [-1, 1])")
-        
-        # Assertions to confirm the shape is correct for the model VAE
-        assert len(video_tensor.shape) == 5, f"Video tensor should have 5 dimensions, but got {len(video_tensor.shape)}"
-        assert video_tensor.shape[0] == BATCH_SIZE, f"Video batch size is incorrect, expected {BATCH_SIZE}"
-        assert video_tensor.shape[1] == 3, "Video should have 3 channels (RGB)"
-        print("    - Shape is valid for VAE input.")
+            # save a sample first frame to verify correctness
+            # first_frame shape is [BATCH_SIZE, 3, 1, H, W]
+            sample_image = first_frame[0, :, 0].permute(1, 2, 0).cpu().numpy()
+            sample_image = ((sample_image + 1) / 2 * 255).clip(0, 255).astype(np.uint8)
+            sample_image = Image.fromarray(sample_image)
+            sample_image.save("/cpfs01/gongshukai/step_distillation/data/tmp/sample_first_frame.png")
+            print(f"    - Sample first frame saved as 'sample_first_frame.png'.")
 
-        print(f"\n  - Audio Tensor:")
-        print(f"    - Shape: {audio_tensor.shape}")
-        print(f"    - Dtype: {audio_tensor.dtype}")
-        
-        # Assertions to confirm the shape is correct
-        assert len(audio_tensor.shape) == 2, f"Audio tensor should have 2 dimensions, but got {len(audio_tensor.shape)}"
-        assert audio_tensor.shape[0] == BATCH_SIZE, f"Audio batch size is incorrect, expected {BATCH_SIZE}"
-        print("    - Shape is valid for VAE input.")
-
-        print("\n\033[92m✓ Batch shapes and dtypes are correct and match the requirements for the Ovi model.\033[0m")
-
-
+            print("\n\033[92m✓ Batch shapes and dtypes are correct and match the requirements for the Ovi model.\033[0m")
     except StopIteration:
         print("✗ DataLoader is empty. This might happen if the CSV is empty or cannot be read.")
     except Exception as e:
         print(f"✗ An error occurred while fetching or inspecting the batch: {e}")
         import traceback
         traceback.print_exc()
-
     print("\n" + "=" * 60)
     print("Test completed.")
     print("=" * 60)

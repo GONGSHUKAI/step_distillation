@@ -26,12 +26,12 @@ class WanTextEncoder(torch.nn.Module):
             device=torch.device('cpu')
         ).eval().requires_grad_(False)
         self.text_encoder.load_state_dict(
-            torch.load(f"wan_models/{self.model_name}/models_t5_umt5-xxl-enc-bf16.pth",
+            torch.load(f"/cpfs01/gongshukai/weights/{self.model_name}/models_t5_umt5-xxl-enc-bf16.pth",
                        map_location='cpu', weights_only=False)
         )
 
         self.tokenizer = HuggingfaceTokenizer(
-            name=f"wan_models/{self.model_name}/google/umt5-xxl/", seq_len=512, clean='whitespace')
+            name=f"/cpfs01/gongshukai/weights/{self.model_name}/google/umt5-xxl/", seq_len=512, clean='whitespace')
 
     @property
     def device(self):
@@ -62,7 +62,7 @@ class WanCLIPEncoder(torch.nn.Module):
             dtype=torch.float16,
             device=torch.device('cpu'),
             checkpoint_path=os.path.join(
-                f"wan_models/{self.model_name}/",
+                f"/cpfs01/gongshukai/weights/{self.model_name}/",
                 "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth",
             )
         )
@@ -96,7 +96,7 @@ class WanVAEWrapper(torch.nn.Module):
 
         # init model
         self.model = _video_vae(
-            pretrained_path=f"wan_models/{self.model_name}/Wan2.1_VAE.pth",
+            pretrained_path=f"/cpfs01/gongshukai/weights/{self.model_name}/Wan2.1_VAE.pth",
             z_dim=16,
         ).eval().requires_grad_(False)
 
@@ -193,7 +193,7 @@ class Wan2_2_VAEWrapper(torch.nn.Module):
             self,
             z_dim=48,
             c_dim=160,
-            vae_pth="wan_models/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
+            vae_pth="/cpfs01/gongshukai/weights/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
             dim_mult=[1, 2, 4, 4],
             temperal_downsample=[False, True, True],
         ):
@@ -384,13 +384,14 @@ class WanDiffusionWrapper(torch.nn.Module):
 
         if is_causal:
             self.model = CausalWanModel.from_pretrained(
-                f"wan_models/{model_name}/", local_attn_size=local_attn_size, sink_size=sink_size)
+                f"/cpfs01/gongshukai/weights/{model_name}/", local_attn_size=local_attn_size, sink_size=sink_size)
+            self.seq_len = 32760  # [1, 21, 16, 60, 104]
         else:
             if "2.2" in model_name:
-                self.model = Wan22Model.from_pretrained(f"wan_models/{model_name}/")
+                self.model = Wan22Model.from_pretrained(f"/cpfs01/gongshukai/weights/{model_name}/")
                 self.seq_len = 27280  # [1, 31, 48, 44, 80]
             else:
-                self.model = WanModel.from_pretrained(f"wan_models/{model_name}/")
+                self.model = WanModel.from_pretrained(f"/cpfs01/gongshukai/weights/{model_name}/")
                 self.seq_len = 32760  # [1, 21, 16, 60, 104]
         self.model.eval()
 

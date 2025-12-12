@@ -21,7 +21,8 @@ from .alias_free_activation.torch.act import \
     Activation1d as TorchActivation1d
 from .env import AttrDict
 from .utils import get_padding, init_weights
-
+import logging
+logger = logging.getLogger(__name__)
 
 def load_hparams_from_json(path) -> AttrDict:
     with open(path) as f:
@@ -334,7 +335,7 @@ class BigVGAN(
 
     def remove_weight_norm(self):
         try:
-            print("Removing weight norm...")
+            logger.info('Removing weight norm...') if torch.distributed.get_rank() == 0 else None
             for l in self.ups:
                 for l_i in l:
                     remove_parametrizations(l_i, 'weight')

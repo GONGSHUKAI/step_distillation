@@ -16,6 +16,9 @@ real_name: Ovi                  # teacher model, frozen
 fake_name: Ovi                  # critic model, trainable
 generator_name: Ovi             # student model, trainable
 generator_type: bidirectional   # bidirectional diffusion, not causal diffusion
+real_path: /cpfs01/gongshukai/weights/Ovi/Ovi/model.safetensors
+fake_path: /cpfs01/gongshukai/weights/Ovi/Ovi/model.safetensors
+generator_path: /cpfs01/gongshukai/weights/Ovi/Ovi/model.safetensors
 
 ## Distillation settings
 distribution_loss: dmd            
@@ -32,8 +35,8 @@ dfake_gen_update_ratio: 5
 denoising_step_list: [1000, 750, 500, 250]
 num_train_timestep: 1000
 timestep_shift: 5.0
-video_guidance_scale: 4.0 # ADDED: Specific guidance for video teacher
-audio_guidance_scale: 3.0 # ADDED: Specific guidance for audio teacher
+video_guidance_scale: 2.0 # ADDED: Specific guidance for video teacher
+audio_guidance_scale: 1.5 # ADDED: Specific guidance for audio teacher
 denoising_loss_type: x0
 video_negative_prompt: "jitter, bad hands, blur, distortion"  # Artifacts to avoid in video
 audio_negative_prompt: "robotic, muffled, echo, distorted"    # Artifacts to avoid in audio
@@ -51,7 +54,7 @@ beta1: 0.0
 beta2: 0.999
 beta1_critic: 0.0
 beta2_critic: 0.999
-batch_size: 4
+batch_size: 2
 ema_weight: 0.99
 ema_start_step: 200
 total_batch_size: 64

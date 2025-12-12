@@ -7,18 +7,6 @@ from torch.distributed.fsdp import FullStateDictConfig, FullyShardedDataParallel
 from torch.distributed.fsdp.api import CPUOffload
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy, transformer_auto_wrap_policy
 
-def ovi_wrap_policy(module, recurse, **kwargs):
-    from ovi.modules.ovi import FusionAttentionBlock
-    from peft.tuners.lora.layer import LoraLayer
-    av_modules_to_wrap = (FusionAttentionBlock, LoraLayer)
-    if recurse:
-        return True
-    if hasattr(module, "layer_name") and module.layer_name.endswith(".base_layer") and isinstance(module, torch.nn.Linear):
-        return True
-    if hasattr(module, "layer_name") and module.layer_name.endswith(".modules_to_save.default"):
-        return True
-    return isinstance(module, av_modules_to_wrap)
-
 def fsdp_state_dict(model):
     fsdp_fullstate_save_policy = FullStateDictConfig(
         offload_to_cpu=True, rank0_only=True
@@ -52,10 +40,6 @@ def fsdp_wrap(module, sharding_strategy="full", mixed_precision=False, wrap_stra
             size_based_auto_wrap_policy,
             min_num_params=min_num_params
         )
-    elif wrap_strategy == "ovi":
-        auto_wrap_policy = ovi_wrap_policy
-    elif wrap_strategy == "none":   # NOTE: change made on Oct 27, 2025
-        auto_wrap_policy = None
     else:
         raise ValueError(f"Invalid wrap strategy: {wrap_strategy}")
 
@@ -125,6 +109,44 @@ class EMA_FSDP:
         with FSDP.summon_full_params(fsdp_module, writeback=False, offload_to_cpu=False):
             for n, p in fsdp_module.module.named_parameters():
                 self.shadow[n].mul_(d).add_(p.detach().float().cpu(), alpha=1. - d)
+
+    # Optional helpers ---------------------------------------------------
+    def state_dict(self):
+        return self.shadow            # picklable
+
+    def load_state_dict(self, sd):
+        self.shadow = {k: v.clone() for k, v in sd.items()}
+
+    def copy_to(self, fsdp_module):
+        # load EMA weights into an (unwrapped) copy of the generator
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        with FSDP.summon_full_params(fsdp_module, writeback=True, offload_to_cpu=True):
+            for n, p in fsdp_module.module.named_parameters():
+                if n in self.shadow:
+                    p.data.copy_(self.shadow[n].to(p.dtype, device=p.device))
+
+class EMA_FSDP_LoRA:
+    def __init__(self, fsdp_module: torch.nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {}
+        self._init_shadow(fsdp_module)
+
+    @torch.no_grad()
+    def _init_shadow(self, fsdp_module):
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        with FSDP.summon_full_params(fsdp_module, writeback=False, offload_to_cpu=True):
+            for n, p in fsdp_module.module.named_parameters():
+                if p.requires_grad:  # Only track LoRA parameters
+                    self.shadow[n] = p.detach().clone().float().cpu()
+
+    @torch.no_grad()
+    def update(self, fsdp_module):
+        d = self.decay
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+        with FSDP.summon_full_params(fsdp_module, writeback=False, offload_to_cpu=False):
+            for n, p in fsdp_module.module.named_parameters():
+                if n in self.shadow:
+                    self.shadow[n].mul_(d).add_(p.detach().float().cpu(), alpha=1. - d)
 
     # Optional helpers ---------------------------------------------------
     def state_dict(self):

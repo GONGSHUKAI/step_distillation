@@ -1,0 +1,43 @@
+# FSDP related settings
+generator_fsdp_wrap_strategy: size
+text_encoder_fsdp_wrap_strategy: size
+sharding_strategy: hybrid_full
+
+# Logging
+wandb_host: https://api.wandb.ai
+wandb_key: afa4e78959b05201e369f448504697737237fc5c
+wandb_entity: shukai_gong-renmin-university-of-china
+wandb_project: ode_pretrain
+wandb_name: wan_causal_ode_pretrain
+
+## Model settings
+model_name: Wan2.1-T2V-1.3B
+generator_type: causal
+
+## ODE pretraining settings
+# generator_ckpt: /cpfs01/gongshukai/weights/self-forcing-ode-init/ode_init.pt
+distribution_loss: ode
+trainer: ode
+num_frame_per_block: 3
+independent_first_frame: false
+denoising_step_list: [1000, 750, 500, 250]
+timestep_shift: 5.0
+model_kwargs:
+  model_name: Wan2.1-T2V-1.3B
+  timestep_shift: 5.0
+
+## Training settings
+gradient_checkpointing: true
+mixed_precision: true  # 使用 bf16
+warp_denoising_step: true
+data_path: /cpfs01/gongshukai/step_distillation/ode_init/mixkit_ode_lmdb
+batch_size: 2
+max_pair: 10000000
+lr: 2.0e-06
+beta1: 0.9
+beta2: 0.999
+weight_decay: 0.01
+log_iters: 1000
+no_visualize: true
+load_raw_video: false
+seed: 0

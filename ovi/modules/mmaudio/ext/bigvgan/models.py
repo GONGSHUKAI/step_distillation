@@ -13,7 +13,8 @@ from torch.nn.utils.parametrize import remove_parametrizations
 from . import activations
 from .alias_free_torch import *
 from .utils import get_padding, init_weights
-
+import logging
+logger = logging.getLogger(__name__)
 LRELU_SLOPE = 0.1
 
 
@@ -245,7 +246,7 @@ class BigVGANVocoder(torch.nn.Module):
         return x
 
     def remove_weight_norm(self):
-        print('Removing weight norm...')
+        # logger.info('Removing weight norm...') if torch.distributed.get_rank() == 0 else None
         for l in self.ups:
             for l_i in l:
                 remove_parametrizations(l_i, 'weight')

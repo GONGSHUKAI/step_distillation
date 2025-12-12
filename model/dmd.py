@@ -5,6 +5,8 @@ import torch
 
 from model.base import SelfForcingModel
 from utils.dataset import masks_like
+import logging
+logger = logging.getLogger(__name__)
 
 class DMD(SelfForcingModel):
     def __init__(self, args, device):
@@ -391,6 +393,8 @@ class DMD(SelfForcingModel):
             flow_pred = None
             pred_fake_noise = None
 
+        # print(f"x shape: {generated_image.flatten(0, 1).shape if generated_image is not None else None}, x_pred shape: {pred_fake_image.flatten(0, 1).shape if pred_fake_image is not None else None}, noise shape: {critic_noise.flatten(0, 1).shape if critic_noise is not None else None}, noise_pred shape: {pred_fake_noise.flatten(0, 1).shape if pred_fake_noise is not None else None}, timestep shape: {critic_timestep.flatten(0, 1).shape if critic_timestep is not None else None}, flow_pred shape: {flow_pred.shape if flow_pred is not None else None}")
+
         denoising_loss = self.denoising_loss_func(
             x=generated_image.flatten(0, 1),
             x_pred=pred_fake_image.flatten(0, 1),
@@ -398,7 +402,7 @@ class DMD(SelfForcingModel):
             noise_pred=pred_fake_noise,
             alphas_cumprod=self.scheduler.alphas_cumprod,
             timestep=critic_timestep.flatten(0, 1),
-            flow_pred=flow_pred,
+            flow_pred=flow_pred.flatten(0, 1)
         )
 
         # Step 5: Debugging Log

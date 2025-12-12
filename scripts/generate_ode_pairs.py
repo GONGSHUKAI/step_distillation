@@ -11,15 +11,20 @@ import os
 
 
 def init_model(device):
-    model = WanDiffusionWrapper().to(device).to(torch.float32)
-    encoder = WanTextEncoder().to(device).to(torch.float32)
+    print(f"Initializing WanModel and text encoder for ODE dataset generation") if torch.distributed.get_rank() == 0 else None
+    model = WanDiffusionWrapper(model_name="Wan2.1-T2V-1.3B").to(device).to(torch.float32)
+    encoder = WanTextEncoder(model_name="Wan2.1-T2V-1.3B").to(device).to(torch.float32)
+    print(f"Model and text encoder initialized") if torch.distributed.get_rank() == 0 else None
     model.model.requires_grad_(False)
 
     scheduler = FlowMatchScheduler(
-        shift=8.0, sigma_min=0.0, extra_one_step=True)
+        shift=5.0, sigma_min=0.0, extra_one_step=True)
     scheduler.set_timesteps(num_inference_steps=48, denoising_strength=1.0)
     scheduler.sigmas = scheduler.sigmas.to(device)
-
+    print(f"Scheduler initialized with {len(scheduler.timesteps)} timesteps") if torch.distributed.get_rank() == 0 else None
+    print(f"Scheduler sigmas: {scheduler.sigmas}") if torch.distributed.get_rank() == 0 else None
+    print(f"Scheduler timesteps: {scheduler.timesteps}") if torch.distributed.get_rank() == 0 else None
+    print(f"At saving stage, noisy_inputs = noisy_inputs[:, [0, 12, 24, 36, -1]] will be saved, which corresponds to [{', '.join([str(t.item()) for t in scheduler.timesteps[[0, 12, 24, 36, -1]]])}]") if torch.distributed.get_rank() == 0 else None
     sample_neg_prompt = '色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走'
 
     unconditional_dict = encoder(
@@ -54,13 +59,12 @@ def main():
     # if global_rank == 0:
     os.makedirs(args.output_folder, exist_ok=True)
 
-    for index in tqdm(range(int(math.ceil(len(dataset) / dist.get_world_size()))), disable=dist.get_rank() != 0):
+    for index in tqdm(range(int(math.ceil(len(dataset) / dist.get_world_size()))), disable=dist.get_rank() != 0, desc="Generating ODE pairs"):
         prompt_index = index * dist.get_world_size() + dist.get_rank()
         if prompt_index >= len(dataset):
             continue
         prompt = dataset[prompt_index]
-
-        conditional_dict = encoder(text_prompts=prompt)
+        conditional_dict = encoder(text_prompts=prompt["prompts"])
 
         latents = torch.randn(
             [1, 21, 16, 60, 104], dtype=torch.float32, device=device
@@ -68,9 +72,9 @@ def main():
 
         noisy_input = []
 
-        for progress_id, t in enumerate(tqdm(scheduler.timesteps)):
+        for progress_id, t in enumerate(tqdm(scheduler.timesteps, disable=dist.get_rank() != 0, desc=f"Processing prompt {prompt_index}")):
             timestep = t * \
-                torch.ones([1, 21], device=device, dtype=torch.float32)
+                torch.ones([1, 21], device=device, dtype=torch.float32) # shape [1, 21]
 
             noisy_input.append(latents)
 
@@ -109,7 +113,7 @@ def main():
         stored_data = noisy_inputs
 
         torch.save(
-            {prompt: stored_data.cpu().detach()},
+            {prompt["prompts"]: stored_data.cpu().detach()},
             os.path.join(args.output_folder, f"{prompt_index:05d}.pt")
         )
 
@@ -118,3 +122,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -6,6 +6,7 @@ import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "Wan2_2_VAE",
@@ -878,7 +879,7 @@ def _video_vae(pretrained_path=None, z_dim=16, dim=160, device="cpu", **kwargs):
         model = WanVAE_(**cfg)
 
     # load checkpoint
-    logging.info(f"loading {pretrained_path}")
+    # logger.info(f"loading {pretrained_path}") if torch.distributed.get_rank() == 0 else None
     model.load_state_dict(
         torch.load(pretrained_path, map_location=device), assign=True)
 

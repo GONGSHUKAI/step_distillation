@@ -37,18 +37,22 @@ class OviBaseModel(nn.Module):
         self.real_model_name = getattr(args, "real_name", "Ovi")        # the teacher model
         self.fake_model_name = getattr(args, "fake_name", "Ovi")        # the critic model
         self.generator_name = getattr(args, "generator_name", "Ovi")    # the student model
+        self.real_model_path = getattr(args, "real_path", None)
+        self.fake_model_path = getattr(args, "fake_path", None)
+        self.generator_path = getattr(args, "generator_path", None)
 
         self.generator = OviFusionWrapper(
             **getattr(args, "model_kwargs", {}),
             model_name=self.generator_name,
+            model_path=self.generator_path,
             is_causal=self.is_causal
         )
         self.generator.model.requires_grad_(True)
 
-        self.real_score = OviFusionWrapper(model_name=self.real_model_name, is_causal=False)
+        self.real_score = OviFusionWrapper(model_name=self.real_model_name, model_path=self.real_model_path, is_causal=False)
         self.real_score.model.requires_grad_(False)
 
-        self.fake_score = OviFusionWrapper(model_name=self.fake_model_name, is_causal=False)
+        self.fake_score = OviFusionWrapper(model_name=self.fake_model_name, model_path=self.fake_model_path, is_causal=False)
         self.fake_score.model.requires_grad_(True)
 
         self.text_encoder = OviTextEncoder()

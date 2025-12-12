@@ -16,6 +16,8 @@ from pipeline import (
 )
 from utils.dataset import TextDataset, TextImagePairDataset
 from utils.misc import set_seed
+import logging
+logger = logging.getLogger(__name__)
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config_path", type=str, help="Path to the config file")
@@ -56,19 +58,28 @@ config = OmegaConf.merge(default_config, config)
 # Initialize pipeline
 if hasattr(config, 'denoising_step_list'):
     # Few-step inference
+    print(f"Using few-step inference with denoising steps: {config.denoising_step_list}")
     pipeline = CausalInferencePipeline(config, device=device)
 else:
     # Multi-step diffusion inference
+    print("Using multi-step diffusion inference")
     pipeline = CausalDiffusionInferencePipeline(config, device=device)
 
 if args.checkpoint_path:
+    print(f"Loading checkpoint from {args.checkpoint_path}")
     state_dict = torch.load(args.checkpoint_path, map_location="cpu")
-    pipeline.generator.load_state_dict(state_dict['generator' if not args.use_ema else 'generator_ema'])
-
+    print(f"Checkpoint keys: {list(state_dict.keys())}")
+    state_dict = state_dict['generator' if not args.use_ema else 'generator_ema']
+    clean_state_dict = {}
+    for k, v in state_dict.items():
+        new_k = k.replace("_fsdp_wrapped_module.", "").replace("_checkpoint_wrapped_module.", "").replace("_orig_mod.", "")
+        clean_state_dict[new_k] = v
+    pipeline.generator.load_state_dict(clean_state_dict)
 pipeline = pipeline.to(device=device, dtype=torch.bfloat16)
 
 # Create dataset
 if args.i2v:
+    print("Using image-to-video (I2V) inference")
     assert not dist.is_initialized(), "I2V does not support distributed inference yet"
     transform = transforms.Compose([
         transforms.Resize((480, 832)),
@@ -77,6 +88,7 @@ if args.i2v:
     ])
     dataset = TextImagePairDataset(args.data_path, transform=transform)
 else:
+    print("Using text-to-video (T2V) inference")
     dataset = TextDataset(prompt_path=args.data_path, extended_prompt_path=args.extended_prompt_path)
 num_prompts = len(dataset)
 print(f"Number of prompts: {num_prompts}")
@@ -122,6 +134,7 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
     num_generated_frames = 0  # Number of generated (latent) frames
 
     if args.i2v:
+        print(f"Processing prompt {idx + 1}/{num_prompts} for image-to-video generation")
         # For image-to-video, batch contains image and caption
         prompt = batch['prompts'][0]  # Get caption from batch
         prompts = [prompt] * args.num_samples
@@ -138,6 +151,7 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         )
     else:
         # For text-to-video, batch is just the text prompt
+        print(f"Processing prompt {idx + 1}/{num_prompts} for text-to-video generation")
         prompt = batch['prompts'][0]
         extended_prompt = batch['extended_prompts'][0] if 'extended_prompts' in batch else None
         if extended_prompt is not None:
