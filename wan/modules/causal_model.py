@@ -850,6 +850,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             if local_attn_size == -1:
                 return (kv_idx < ends[q_idx]) | (q_idx == kv_idx)
             else:
+                # problematic? kv_idx < sink_size?
                 return ((kv_idx < ends[q_idx]) & (kv_idx >= (ends[q_idx] - local_attn_size * frame_seqlen))) | \
                     (q_idx == kv_idx)
 
