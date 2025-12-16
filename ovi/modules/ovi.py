@@ -1,4 +1,4 @@
-# FILE: /videogen/Wan2.2-TI2V-5B-Turbo/ovi/modules/fusion.py
+# FILE: ovi/modules/ovi.py
 # VERSION: Final Optimized FSDP-Native Refactor
 
 import math
