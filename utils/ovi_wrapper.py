@@ -10,6 +10,7 @@ import random
 
 # from ovi.modules.fusion import FusionModel
 from ovi.modules.ovi import FusionModel
+from ovi.modules.causal_ovi import CausalFusionModel
 from ovi.modules.t5 import umt5_xxl
 from wan22.modules.vae2_2 import _video_vae as _video_vae_2_2
 from ovi.modules.mmaudio.features_utils import FeaturesUtils
@@ -221,12 +222,19 @@ class OviFusionWrapper(torch.nn.Module):
         with open(audio_config_path) as f:
             self.audio_config = json.load(f)
 
-        logger.info(f"Initializing Ovi FusionModel: {self.video_config['num_layers']} video blocks and {self.audio_config['num_layers']} audio blocks...") if dist.get_rank() == 0 else None
-        self.model = FusionModel(self.video_config, self.audio_config).to(dtype=torch.bfloat16, device=torch.device('cpu'))
+        if is_causal:
+            logger.info(f"Initializing CausalFusionModel: {self.video_config['num_layers']} video blocks and {self.audio_config['num_layers']} audio blocks...") if dist.get_rank() == 0 else None
+            self.model = CausalFusionModel(self.video_config, self.audio_config).to(dtype=torch.bfloat16, device=torch.device('cpu'))
+        else:
+            logger.info(f"Initializing FusionModel: {self.video_config['num_layers']} video blocks and {self.audio_config['num_layers']} audio blocks...") if dist.get_rank() == 0 else None
+            self.model = FusionModel(self.video_config, self.audio_config).to(dtype=torch.bfloat16, device=torch.device('cpu'))
 
         if model_path is not None:
             logger.info(f"Ovi FusionModel initialized, loading model weights from {model_path}...") if dist.get_rank() == 0 else None
-            original_state_dict = load_file(model_path, device='cpu')
+            if model_path.endswith(".pt"):
+                original_state_dict = torch.load(model_path, map_location='cpu')['generator_ema']
+            else:
+                original_state_dict = load_file(model_path, device='cpu')
         else:
             model_path = f"/cpfs01/gongshukai/weights/Ovi/{self.model_name}/model_960x960.safetensors"
             logger.info(f"Ovi FusionModel initialized, loading model weights from {model_path}...") if dist.get_rank() == 0 else None
@@ -296,15 +304,18 @@ class OviFusionWrapper(torch.nn.Module):
     
     def forward(
         self,
-        video_latent: torch.Tensor,
-        audio_latent: torch.Tensor,
-        timestep: torch.Tensor,
-        conditional_dict: dict,
+        video_latent: Optional[torch.Tensor] = None,
+        audio_latent: Optional[torch.Tensor] = None,
+        timestep: Optional[torch.Tensor] = None,
+        conditional_dict: Optional[dict] = None,
         
         wan22_image_latent: Optional[torch.Tensor] = None,
         mask2: Optional[torch.Tensor] = None,
         first_frame_is_clean: bool = False,
         slg_layer: Optional[int] = False,
+        timestep_v: Optional[torch.Tensor] = None,
+        timestep_a: Optional[torch.Tensor] = None,
+
         **kwargs 
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         
@@ -327,7 +338,7 @@ class OviFusionWrapper(torch.nn.Module):
         
         # Timestep: [B] (保持原样，FusionModel 会处理)
         # 如果传入的是 [B, F] 这种，只取第一个维度
-        ts_input = timestep[:, 0] if timestep.dim() > 1 else timestep
+        
 
         # 计算 seq_len (用于 RoPE 等)
         num_frames, c, h, w = video_latent.shape[1:]
@@ -338,32 +349,44 @@ class OviFusionWrapper(torch.nn.Module):
         
         # --- 2. 调用 FusionModel ---
         # FusionModel 接受 List[Tensor] 作为输入
-        flow_pred_video_list, flow_pred_audio_list = self.model(
-            vid=video_input_list,
-            audio=audio_input_list,
-            t=ts_input,
-            vid_context=video_context_list,
-            audio_context=audio_context_list,
-            vid_seq_len=vid_seq_len,
-            audio_seq_len=audio_seq_len,
-            first_frame_is_clean=first_frame_is_clean,
-            slg_layer=slg_layer
-        )
+        if self.is_causal:
+            assert timestep_v is not None and timestep_a is not None
+            flow_pred_video_list, flow_pred_audio_list = self.model(
+                vid=video_input_list,
+                audio=audio_input_list,
+                t_vid=timestep_v,
+                t_aud=timestep_a,
+                vid_context=video_context_list,
+                audio_context=audio_context_list,
+                vid_seq_len=vid_seq_len,
+                audio_seq_len=audio_seq_len,
+                first_frame_is_clean=first_frame_is_clean,
+                slg_layer=slg_layer
+            )
+            flow_pred_video = torch.stack(flow_pred_video_list).permute(0, 2, 1, 3, 4)
+            flow_pred_audio = torch.stack(flow_pred_audio_list)
+            x0_pred_video = self._convert_flow_pred_to_x0(flow_pred_video, video_latent, timestep_v)
+            x0_pred_audio = self._convert_flow_pred_to_x0(flow_pred_audio, audio_latent, timestep_a)
 
-        # --- 3. 恢复输出维度 ---
-        
-        # Video Output: List of [C, F, H, W] -> Stack -> [B, C, F, H, W] -> Permute -> [B, F, C, H, W]
-        # 这里的 permute 是为了和输入的 video_latent [B, F, C, H, W] 对齐
-        flow_pred_video = torch.stack(flow_pred_video_list).permute(0, 2, 1, 3, 4)
-        
-        # Audio Output: List of [L, C] -> Stack -> [B, L, C]
-        flow_pred_audio = torch.stack(flow_pred_audio_list)
-        
-        # --- 4. 转换为 x0 ---
-        x0_pred_video = self._convert_flow_pred_to_x0(flow_pred_video, video_latent, ts_input)
-        x0_pred_audio = self._convert_flow_pred_to_x0(flow_pred_audio, audio_latent, ts_input)
+        else:
+            ts_input = timestep[:, 0] if timestep.dim() > 1 else timestep
+            flow_pred_video_list, flow_pred_audio_list = self.model(
+                vid=video_input_list,
+                audio=audio_input_list,
+                t=ts_input,
+                vid_context=video_context_list,
+                audio_context=audio_context_list,
+                vid_seq_len=vid_seq_len,
+                audio_seq_len=audio_seq_len,
+                first_frame_is_clean=first_frame_is_clean,
+                slg_layer=slg_layer
+            )
+            flow_pred_video = torch.stack(flow_pred_video_list).permute(0, 2, 1, 3, 4)
+            flow_pred_audio = torch.stack(flow_pred_audio_list)
+            x0_pred_video = self._convert_flow_pred_to_x0(flow_pred_video, video_latent, ts_input)
+            x0_pred_audio = self._convert_flow_pred_to_x0(flow_pred_audio, audio_latent, ts_input)
 
-        # --- 5. Mask 处理 ---
+        # --- 3. Mask 处理 ---
         if mask2 is not None and wan22_image_latent is not None:
             # mask2 shape: [B, F, C, H, W] (需要确保 masks_like 返回了正确的 batch size)
             # wan22_image_latent shape: [B, 1, C, H, W]
@@ -414,283 +437,11 @@ def remap_ovi_state_dict_for_refactored(state_dict):
         elif k.startswith("audio_model."):
             new_key = k.replace("audio_model.", "audio_")
         
+        new_key = new_key.replace("_fsdp_wrapped_module.", "")\
+                         .replace("_checkpoint_wrapped_module.", "")\
+                         .replace("_orig_mod.", "")
+        if new_key.startswith("model."):
+            new_key = new_key[len("model."):]
+        
         new_state_dict[new_key] = v
     return new_state_dict
-
-
-
-if __name__ == "__main__":
-    import torchaudio, imageio
-    import decord, torchaudio
-    import numpy as np
-    from torchvision.transforms.functional import resize
-    from torch.utils.data import DataLoader
-    
-    # PROMPT = "The video opens with a wide high-angle shot, looking down over a vast, arid desert landscape. In the immediate foreground, a large, dark brown rock formation partially obscures the view. As the camera pans slightly to the right, the rock formation moves out of the frame, revealing a barren desert valley with a highway running through it. A small, sparse town is visible on the right side of the highway. In the mid-ground, a large, enclosed dirt arena, possibly for a demolition derby, comes into full view. Several battered cars are scattered within the arena, surrounded by a low, yellow barrier. Beyond the arena, there's a large, open lot filled with numerous parked cars, resembling a junkyard or a used car lot. In the far background, a range of large, dark mountains stretches across the horizon under a hazy sky. The overall visual style is realistic."
-    # VIDEO_PATH = "/cpfs01/gongshukai/audio_preprocess/matrix/video/1fa65cb31263f327a902_114_sdr_4.mp4"
-    # AUDIO_PATH = "/cpfs01/gongshukai/audio_preprocess/matrix/audio/1fa65cb31263f327a902_114_sdr_4.wav"
-    VIDEO_RECON_PATH = "/cpfs01/gongshukai/step_distillation/data/tmp/recon_video.mp4"
-    AUDIO_RECON_PATH = "/cpfs01/gongshukai/step_distillation/data/tmp/recon_audio.wav"
-
-    # def preprocess_video(video_path, max_pixels=704*1280):
-    #     print(f"Preprocessing video from {video_path}...")
-    #     video_reader = decord.VideoReader(uri=video_path, num_threads=1)
-    #     num_frames = (len(video_reader) - 1) // 4 * 4 + 1  # 4n+1
-    #     frame_indices = list(range(num_frames))
-        
-    #     frames = torch.from_numpy(video_reader.get_batch(frame_indices).asnumpy()).float()
-    #     frames = frames.permute(0, 3, 1, 2) # T, C, H, W
-    #     orig_h, orig_w = frames.shape[2], frames.shape[3]
-    #     target_h, target_w = orig_h, orig_w
-    #     if target_h * target_w > max_pixels:
-    #         aspect_ratio = orig_w / orig_h
-    #         target_h = int((max_pixels / aspect_ratio) ** 0.5)
-    #         target_w = int(target_h * aspect_ratio)
-            
-    #     target_h = target_h // 32 * 32
-    #     target_w = target_w // 32 * 32
-    #     print(f"Resizing video from ({orig_h}, {orig_w}) to ({target_h}, {target_w}) to meet pixel limit.")
-        
-    #     resized_frames = torch.stack([resize(f, (target_h, target_w)) for f in frames], dim=0)
-    #     video_tensor = resized_frames.permute(1, 0, 2, 3) # C, T, H, W
-    #     video_tensor = (video_tensor / 255.0) * 2.0 - 1.0
-    #     return video_tensor.unsqueeze(0) # Add batch dimension
-
-    # def preprocess_audio(audio_path, sample_rate=16000, duration_secs=5):
-    #     print(f"Preprocessing audio from {audio_path}...")
-    #     target_len = math.ceil(sample_rate * duration_secs // 512) * 512
-    #     waveform, sr = torchaudio.load(audio_path)
-        
-    #     if sr != sample_rate:
-    #         resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=sample_rate)
-    #         waveform = resampler(waveform)
-            
-    #     if waveform.shape[0] > 1:
-    #         waveform = torch.mean(waveform, dim=0, keepdim=True)
-            
-    #     if waveform.shape[1] > target_len:
-    #         waveform = waveform[:, :target_len]
-    #     else:
-    #         waveform_len = waveform.shape[1] // 512 * 512
-    #         waveform = waveform[:, :waveform_len]
-    #     return waveform
-    
-    def save_video(video_tensor: torch.Tensor, save_path: str, fps: int = 24):
-        import imageio
-        video_np = (video_tensor.clamp(-1,1)+1)/2*255          # → [0,255]
-        video_np = video_np.squeeze(0).permute(0,2,3,1).cpu().numpy().astype(np.uint8)
-        imageio.mimsave(save_path, video_np, fps=fps, codec='libx264')
-        print(f"Saved video to {save_path}")
-
-    def save_audio(audio_tensor: torch.Tensor, save_path: str, sample_rate: int = 16000):
-        import torchaudio
-        torchaudio.save(
-            save_path,
-            audio_tensor.clamp(-1, 1).cpu(),
-            sample_rate=sample_rate
-        )
-        print(f"Saved audio to {save_path}")
-
-    # try:
-    #     video_tensor = preprocess_video(VIDEO_PATH)
-    #     audio_tensor = preprocess_audio(AUDIO_PATH)
-    #     print(f"\n✓ Data preprocessed:")
-    #     print(f"  - Video tensor shape: {video_tensor.shape}, dtype: {video_tensor.dtype}, device: {video_tensor.device}")
-    #     print(f"  - Audio tensor shape: {audio_tensor.shape}, dtype: {audio_tensor.dtype}, device: {audio_tensor.device}")
-    # except Exception as e:
-    #     print(f"✗ Error during data preprocessing: {e}")
-    #     exit()
-
-    from dataset import OviCSVDataset
-    CSV_PATH = "/cpfs01/gongshukai/step_distillation/data/matrix_audio_ovi.csv"
-    NUM_FRAMES = 121  # Use a number of frames that matches your CSV, e.g., 63
-    TARGET_H = 704   # Example target resolution
-    TARGET_W = 1280  # Example target resolution
-    AUDIO_SAMPLE_RATE = 16000
-    AUDIO_DURATION_SECS = 5
-    # DataLoader parameters
-    BATCH_SIZE = 1 # Use a batch size > 1 to test collation
-    try:
-        dataset = OviCSVDataset(
-            data_path=CSV_PATH,
-            num_frames=NUM_FRAMES,
-            h=TARGET_H,
-            w=TARGET_W,
-            audio_sample_rate=AUDIO_SAMPLE_RATE,
-            audio_duration_secs=AUDIO_DURATION_SECS,
-        )
-        print(f"✓ Dataset initialized successfully with {len(dataset)} samples.")
-    except Exception as e:
-        print(f"✗ Error initializing dataset: {e}")
-        print("  Please ensure the CSV file exists at the specified path and is correctly formatted.")
-        exit()
-
-    data_loader = DataLoader(
-        dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=0 # Set to 0 for simple testing, can be increased for performance
-    )
-    print(f"✓ DataLoader created with batch size {BATCH_SIZE}.")
-
-    try:
-        print("\nFetching one batch...")
-        batch = next(iter(data_loader))
-        print("✓ Batch fetched successfully.")
-
-        # 4. Verify the contents and shapes
-        print("\n--- Batch Content Verification ---")
-        video_tensor = batch["video"]
-        audio_tensor = batch["audio"]
-        PROMPT = batch["prompts"]
-
-        print(f"  - Prompts:")
-        print(f"    - Type: {type(PROMPT)}")
-        print(f"    - Length: {len(PROMPT)} (should match batch size of {BATCH_SIZE})")
-        print(f"    - Example prompt: '{PROMPT[0][:80]}...'")
-
-        print(f"\n  - Video Tensor:")
-        print(f"    - Shape: {video_tensor.shape}")
-        print(f"    - Dtype: {video_tensor.dtype}")
-        print(f"    - Value Range: min={video_tensor.min():.2f}, max={video_tensor.max():.2f} (should be approx. [-1, 1])")
-        
-        # Assertions to confirm the shape is correct for the model VAE
-        assert len(video_tensor.shape) == 5, f"Video tensor should have 5 dimensions, but got {len(video_tensor.shape)}"
-        assert video_tensor.shape[0] == BATCH_SIZE, f"Video batch size is incorrect, expected {BATCH_SIZE}"
-        assert video_tensor.shape[1] == 3, "Video should have 3 channels (RGB)"
-        print("    - Shape is valid for VAE input.")
-
-        print(f"\n  - Audio Tensor:")
-        print(f"    - Shape: {audio_tensor.shape}")
-        print(f"    - Dtype: {audio_tensor.dtype}")
-        
-        # Assertions to confirm the shape is correct
-        assert len(audio_tensor.shape) == 2, f"Audio tensor should have 2 dimensions, but got {len(audio_tensor.shape)}"
-        assert audio_tensor.shape[0] == BATCH_SIZE, f"Audio batch size is incorrect, expected {BATCH_SIZE}"
-        print("    - Shape is valid for VAE input.")
-
-        print("\n\033[92m✓ Batch shapes and dtypes are correct and match the requirements for the Ovi model.\033[0m")
-
-
-    except StopIteration:
-        print("✗ DataLoader is empty. This might happen if the CSV is empty or cannot be read.")
-    except Exception as e:
-        print(f"✗ An error occurred while fetching or inspecting the batch: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-    # print("=" * 50)
-    # print("Testing OviTextEncoder (CPU initialization)...")
-    # print("=" * 50)
-    # try:
-    #     text_encoder = OviTextEncoder()
-    #     print(f"✓ Text encoder initialized on: {next(text_encoder.parameters()).device}")
-        
-    #     # 移动到GPU (模拟FSDP包装前的操作)
-    #     text_encoder = text_encoder.cuda()
-    #     print(f"✓ Text encoder moved to: {next(text_encoder.parameters()).device}")
-        
-    #     # 测试forward
-    #     prompts = PROMPT
-    #     result = text_encoder(prompts)
-    #     print(f"✓ prompt_embeds shape: {result['prompt_embeds'].shape}")
-    #     print(f"✓ prompt_embeds device: {result['prompt_embeds'].device}")
-    # except Exception as e:
-    #     print(f"✗ Error: {e}")
-    #     import traceback
-    #     traceback.print_exc()
-
-    # text_encoder = text_encoder.to(device=torch.device('cpu'))
-    # del text_encoder 
-
-    print("\n" + "=" * 50)
-    print("Testing OviVAEWrapper (CPU initialization)...")
-    print("=" * 50)
-    try:
-        vae = OviVAEWrapper()
-        print(f"✓ VAE initialized")
-        print(f"  Video VAE device: {next(vae.video_vae.parameters()).device}, dtype: {next(vae.video_vae.parameters()).dtype}")
-        print(f"  Audio VAE device: {next(vae.audio_vae.parameters()).device}, dtype: {next(vae.audio_vae.parameters()).dtype}")
-        
-        # 移动到GPU (模拟Trainer中的操作)
-        vae = vae.to(device=torch.device('cuda'))
-        print(f"✓ VAE moved to GPU")
-        print(f"  Video VAE device: {next(vae.video_vae.parameters()).device}, dtype: {next(vae.video_vae.parameters()).dtype}")
-        print(f"  Audio VAE device: {next(vae.audio_vae.parameters()).device}, dtype: {next(vae.audio_vae.parameters()).dtype}")
-        
-        # 测试编解码
-        video = video_tensor.cuda()
-        video_latent = vae.encode_video(video)
-        print(f"✓ Video latent shape: {video_latent.shape}, dtype: {video_latent.dtype}")
-        
-        video_recon = vae.decode_video(video_latent)
-        print(f"✓ Video recon shape: {video_recon.shape}, dtype: {video_recon.dtype}")
-        
-        audio = audio_tensor.cuda()
-        # audio = torch.randn(1, 16000 * 5).cuda()   # 使用随机音频进行测试
-        audio_latent = vae.encode_audio(audio)
-        print(f"✓ Audio latent shape: {audio_latent.shape}, dtype: {audio_latent.dtype}")
-        
-        audio_recon = vae.decode_audio(audio_latent)
-        print(f"✓ Audio recon shape: {audio_recon.shape}, dtype: {audio_recon.dtype}")
-        audio_recon = audio_recon.squeeze(0)
-
-        # 保存视频、音频到/cpfs01/gongshukai/step_distillation/data/tmp
-        os.makedirs("/cpfs01/gongshukai/step_distillation/data/tmp", exist_ok=True)
-        save_video(video_recon, VIDEO_RECON_PATH, fps=24)
-        save_audio(audio_recon, AUDIO_RECON_PATH, sample_rate=16000)
-        print(f"✓ Reconstructed video and audio saved to /cpfs01/gongshukai/step_distillation/data/tmp/")
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        import traceback
-        traceback.print_exc()
-    
-    # vae = vae.to(device=torch.device('cpu'))
-    # del vae
-
-    # print("\n" + "=" * 50)
-    # print("Testing OviFusionWrapper (CPU initialization)...")
-    # print("=" * 50)
-    # try:
-    #     model = OviFusionWrapper()
-    #     print(f"✓ Fusion model initialized")
-    #     # print(f"  Video model device: {next(model.model.video_model.parameters()).device}, dtype: {next(model.model.video_model.parameters()).dtype}")
-    #     # print(f"  Audio model device: {next(model.model.audio_model.parameters()).device}, dtype: {next(model.model.audio_model.parameters()).dtype}")
-        
-    #     # 移动到GPU (模拟FSDP包装前的操作)
-    #     model = model.cuda()
-    #     print(f"✓ Fusion model moved to GPU")
-        
-    #     # 测试forward
-    #     # video_latent = video_latent.cuda().to(dtype=torch.bfloat16)           # standard video shape [B, F, C, H, W] = [B, 31, 48, 44, 80]
-    #     video_latent = torch.randn(1, 31, 48, 44, 80).cuda().to(dtype=torch.bfloat16)  # 使用随机潜变量进行测试，形状为 [B, F, C, H, W]
-    #     # audio_latent = audio_latent.permute(0, 2, 1).cuda().to(dtype=torch.bfloat16)                  # standard audio shape [B, L, D] = [B, 157, 20]
-    #     audio_latent = torch.randn(1, 157, 20).cuda().to(dtype=torch.bfloat16)  # 使用随机潜变量进行测试，形状为 [B, L, D]
-    #     timestep = torch.ones(1).long().cuda() * 500
-    #     # text_embeds = result['prompt_embeds'].cuda().to(dtype=torch.bfloat16)
-    #     text_embeds = torch.randn(1, 512, 4096).cuda().to(dtype=torch.bfloat16)  # 使用随机文本嵌入进行测试，形状为 [B, Seq_Len, D]
-    #     conditional_dict = {"prompt_embeds": text_embeds}
-    #     print(f"✓ Input video_latent shape: {video_latent.shape}, dtype: {video_latent.dtype}")
-    #     print(f"✓ Input audio_latent shape: {audio_latent.shape}, dtype: {audio_latent.dtype}")
-    #     print(f"✓ Input timestep: {timestep}")
-    #     print(f"✓ Input text_embeds shape: {text_embeds.shape}, dtype: {text_embeds.dtype}")
-    #     pred_video, pred_audio = model(
-    #         video_latent=video_latent,
-    #         audio_latent=audio_latent,
-    #         timestep=timestep,
-    #         conditional_dict=conditional_dict,
-    #     )
-        
-    #     print(f"✓ Pred video shape: {pred_video.shape}, dtype: {pred_video.dtype}")
-    #     print(f"✓ Pred audio shape: {pred_audio.shape}, dtype: {pred_audio.dtype}")
-    # except Exception as e:
-    #     print(f"✗ Error: {e}")
-    #     import traceback
-    #     traceback.print_exc()
-    
-    # del model
-
-    # print("\n" + "=" * 50)
-    # print("All tests completed!")
-    # print("=" * 50)

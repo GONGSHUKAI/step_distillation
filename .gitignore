@@ -203,6 +203,7 @@ VBench
 
 utils/ovi_wrapper_exp.py
 data/tmp
+data/ode*
 data/MagicData.csv
 data/preprocess*
 data/matrix_audio_ovi_newformat.csv
@@ -248,3 +249,5 @@ wan2.2_fewstep.py
 *.png
 logs/
 *deprecated*
+*.mp4
+*.ipynb

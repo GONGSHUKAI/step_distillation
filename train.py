@@ -5,7 +5,7 @@ import sys
 from omegaconf import OmegaConf
 import wandb
 
-from trainer import DiffusionTrainer, GANTrainer, ODETrainer, ScoreDistillationTrainer, Wan22ScoreDistillationTrainer, OviScoreDistillationTrainer, OviScoreDistillationImageVideoTrainer, OviScoreDistillationImageVideoRLTrainer, OviScoreDistillationImageVideoRewardTrainer
+from trainer import DiffusionTrainer, GANTrainer, ODETrainer, ScoreDistillationTrainer, Wan22ScoreDistillationTrainer, OviScoreDistillationTrainer, OviScoreDistillationImageVideoTrainer, OviScoreDistillationImageVideoRLTrainer, OviScoreDistillationImageVideoRewardTrainer, OviODETrainer
 import logging, os
 logging.basicConfig(
     level=logging.INFO,
@@ -75,6 +75,8 @@ def main():
         trainer = GANTrainer(config)
     elif config.trainer == "ode":
         trainer = ODETrainer(config)
+    elif config.trainer == "ovi_ode":
+        trainer = OviODETrainer(config)
     elif config.trainer == "score_distillation":
         trainer = ScoreDistillationTrainer(config)
     elif config.trainer == "score_distillation_wan22":

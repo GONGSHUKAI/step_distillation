@@ -1,7 +1,18 @@
+"""
+with correct block mapping logic
+original: 
+    video: [1, 3 , 3 , 3 , 3 , 3 , 3 , 3 , 3 , 3 , 3 ] -> 31 video frames
+    audio: [5, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15] -> 155 audio frames
+now:
+    video: [4,  4 , 4,  4,  4,  4,  4,  4] -> 32 video frames
+    audio: [20, 20, 20, 20, 20, 20, 20, 20, 20, 20] -> 160 audio frames
+"""
+
 # FILE: ovi/modules/causal_ovi.py
 
 import math
 import torch
+import torch.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
@@ -13,18 +24,14 @@ from diffusers.models.modeling_utils import ModelMixin
 from ovi.modules.model import (
     WanRMSNorm, WanLayerNorm, Head, ChannelLastConv1d, ConvMLP, 
     rope_params, sinusoidal_embedding_1d, rope_apply, 
-    ModulationAdd
+    ModulationAdd, MLPProj
 )
-# Using 'attention' from ovi.modules.attention
 from ovi.modules.attention import attention, flash_attention
-
-# Flex Attention imports
 from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 import logging
 
 logger = logging.getLogger(__name__)
 
-# Compile flex_attention for performance
 flex_attention = torch.compile(
     flex_attention, dynamic=False, mode="max-autotune-no-cudagraphs"
 )
@@ -37,9 +44,9 @@ def gradient_checkpointing(module: nn.Module, *args, enabled: bool, **kwargs):
     return checkpoint(module, *args, use_reentrant=False, **kwargs)
 
 # ========================================================================================
-# RoPE Utilities (保持不变)
+# RoPE Utilities (Inference)
 # ========================================================================================
-
+@amp.autocast('cuda', enabled=False)
 def causal_rope_apply_1d(x, grid_sizes, freqs, start_index=0):
     n, c = x.size(2), x.size(3) // 2
     c_rope = freqs.shape[1] 
@@ -56,6 +63,7 @@ def causal_rope_apply_1d(x, grid_sizes, freqs, start_index=0):
         output.append(x_i)
     return torch.stack(output).type_as(x)
 
+@amp.autocast('cuda', enabled=False)
 def causal_rope_apply_3d(x, grid_sizes, freqs, start_frame_index=0):
     n, c = x.size(2), x.size(3) // 2
     freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
@@ -73,6 +81,7 @@ def causal_rope_apply_3d(x, grid_sizes, freqs, start_frame_index=0):
         output.append(x_i)
     return torch.stack(output).type_as(x)
 
+@amp.autocast('cuda', enabled=False)
 def causal_rope_apply(x, grid_sizes, freqs, start_index=0, tokens_per_frame=None):
     x_ndim = grid_sizes.shape[-1]
     if x_ndim == 3:
@@ -83,76 +92,57 @@ def causal_rope_apply(x, grid_sizes, freqs, start_index=0, tokens_per_frame=None
         return causal_rope_apply_1d(x, grid_sizes, freqs, start_index=start_index)
 
 # ========================================================================================
-# Core Calculation Logic (Stateless)
+# Core Fusion Calculation Logic
 # ========================================================================================
 
 def causal_fusion_logic(
-    # Weights container (the cross_attn block where layers are injected)
-    module_container, 
-    # Inputs
-    q_src, target_seq, 
-    # Props
+    module_container, q_src, target_seq, 
     local_attn_size, sink_size,
-    # Context
     block_mask=None, fusion_cache=None,
     grid_sizes_src=None, freqs_src=None,
     grid_sizes_target=None, freqs_target=None,
     current_start=0, cache_start=0
 ):
-    """
-    执行 Fusion Attention 的具体计算逻辑。
-    参数 module_container 应当包含 k_fusion, v_fusion, pre_attn_norm_fusion, norm_k_fusion 层。
-    """
     b, s_q, n, d = q_src.shape
     
-    # 1. Projection (使用注入的权重)
+    # 1. Projection (Weights from module_container)
     target_seq_norm = module_container.pre_attn_norm_fusion(target_seq)
     k = module_container.norm_k_fusion(module_container.k_fusion(target_seq_norm)).view(b, -1, n, d)
     v = module_container.v_fusion(target_seq_norm).view(b, -1, n, d)
     
-    # Helper
     def get_tokens_per_frame(g): return math.prod(g[0][1:]).item() if g.shape[-1] == 3 else 1
     tpf_src = get_tokens_per_frame(grid_sizes_src)
     tpf_target = get_tokens_per_frame(grid_sizes_target)
     
-    # Max attention size calculation
-    # base_tokens = 880 # Just for reference in calculation
-    current_max_attn_size = 27280 if local_attn_size == -1 else local_attn_size * tpf_target
+    current_max_attn_size = 28160 if local_attn_size == -1 else local_attn_size * tpf_target
 
     if fusion_cache is not None:
-        # --- INFERENCE MODE ---
+        # Inference (Rolling Cache)
         q_src = causal_rope_apply(q_src, grid_sizes_src, freqs_src, start_index=current_start, tokens_per_frame=tpf_src)
         k = causal_rope_apply(k, grid_sizes_target, freqs_target, start_index=cache_start, tokens_per_frame=tpf_target)
         
         real_sink_tokens = sink_size * tpf_target
         kv_cache_size = fusion_cache["k"].shape[1]
         num_new_tokens = k.shape[1]
-
         current_end = fusion_cache["global_end_index"].item() + num_new_tokens
         
-        # Cache Rolling Logic (Sink + Window)
         if local_attn_size != -1 and (current_end > fusion_cache["global_end_index"].item()) and \
            (num_new_tokens + fusion_cache["local_end_index"].item() > kv_cache_size):
-            
             num_evicted = num_new_tokens + fusion_cache["local_end_index"].item() - kv_cache_size
             num_rolled = fusion_cache["local_end_index"].item() - num_evicted - real_sink_tokens
-            
             if num_rolled > 0:
                 fusion_cache["k"][:, real_sink_tokens : real_sink_tokens + num_rolled] = \
                     fusion_cache["k"][:, real_sink_tokens + num_evicted : real_sink_tokens + num_evicted + num_rolled].clone()
                 fusion_cache["v"][:, real_sink_tokens : real_sink_tokens + num_rolled] = \
                     fusion_cache["v"][:, real_sink_tokens + num_evicted : real_sink_tokens + num_evicted + num_rolled].clone()
-            
             local_write_start = fusion_cache["local_end_index"].item() - num_evicted
             local_write_end = local_write_start + num_new_tokens
-            
             fusion_cache["k"][:, local_write_start : local_write_end] = k
             fusion_cache["v"][:, local_write_start : local_write_end] = v
             local_end_index = local_write_end
         else:
             local_write_start = fusion_cache["local_end_index"].item()
             local_write_end = local_write_start + num_new_tokens
-            
             fusion_cache["k"][:, local_write_start : local_write_end] = k
             fusion_cache["v"][:, local_write_start : local_write_end] = v
             local_end_index = local_write_end
@@ -161,35 +151,24 @@ def causal_fusion_logic(
         fusion_cache["local_end_index"].fill_(local_end_index)
         
         att_start = max(0, local_end_index - current_max_attn_size)
-        k_view = fusion_cache["k"][:, :local_end_index] # View valid part
+        k_view = fusion_cache["k"][:, :local_end_index]
         v_view = fusion_cache["v"][:, :local_end_index]
         x = attention(q_src, k_view, v_view)
-        
     else:
-        # --- TRAINING MODE ---
+        # Training
         q_src = rope_apply(q_src, grid_sizes_src, freqs_src)
         k = rope_apply(k, grid_sizes_target, freqs_target)
-        
         s_kv = k.shape[1]
         pad_len_q = math.ceil(s_q / 128) * 128 - s_q
         pad_len_kv = math.ceil(s_kv / 128) * 128 - s_kv
-        
         def pad_tensor(t, pad):
             if pad > 0: return torch.cat([t, torch.zeros(b, pad, n, d, device=t.device, dtype=t.dtype)], dim=1)
             return t
-
         q_pad = pad_tensor(q_src, pad_len_q)
         k_pad = pad_tensor(k, pad_len_kv)
         v_pad = pad_tensor(v, pad_len_kv)
-        
-        x = flex_attention(
-            query=q_pad.transpose(2, 1),
-            key=k_pad.transpose(2, 1),
-            value=v_pad.transpose(2, 1),
-            block_mask=block_mask
-        )
+        x = flex_attention(query=q_pad.transpose(2, 1), key=k_pad.transpose(2, 1), value=v_pad.transpose(2, 1), block_mask=block_mask)
         x = x.transpose(2, 1)
-        
         if pad_len_q > 0: x = x[:, :s_q]
             
     x = x.flatten(2)
@@ -207,10 +186,9 @@ class CausalWanSelfAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.qk_norm = qk_norm
         self.eps = eps
-        
         self.local_attn_size = local_attn_size
         self.sink_size = sink_size
-        self.max_attention_size = 27280 if local_attn_size == -1 else local_attn_size * 880 
+        self.max_attention_size = 28160 if local_attn_size == -1 else local_attn_size * 880 
 
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
@@ -232,7 +210,6 @@ class CausalWanSelfAttention(nn.Module):
             tokens_per_frame = 1
 
         if kv_cache is not None:
-            # Inference
             q_rope = causal_rope_apply(q, grid_sizes, freqs, start_index=current_start, tokens_per_frame=tokens_per_frame)
             k_rope = causal_rope_apply(k, grid_sizes, freqs, start_index=current_start, tokens_per_frame=tokens_per_frame)
             
@@ -268,7 +245,6 @@ class CausalWanSelfAttention(nn.Module):
             v_view = kv_cache["v"][:, att_start:local_end_index]
             x = attention(q_rope, k_view, v_view)
         else:
-            # Training
             q = rope_apply(q, grid_sizes, freqs)
             k = rope_apply(k, grid_sizes, freqs)
             padded_length = math.ceil(s / 128) * 128 - s
@@ -282,7 +258,6 @@ class CausalWanSelfAttention(nn.Module):
 
         x = x.flatten(2)
         return self.o(x)
-
 
 class CausalWanT2VCrossAttention(CausalWanSelfAttention):
     def forward(self, x, context, context_lens, crossattn_cache=None):
@@ -305,19 +280,15 @@ class CausalWanT2VCrossAttention(CausalWanSelfAttention):
 
         x_out = flash_attention(q, k, v, k_lens=context_lens)
         x_out = x_out.flatten(2)
-        # Note: We return raw Attention Output and Q (Projected)
-        # We do NOT run self.o(x) here because it will be done after summing fusion attn
         return x_out, q
-    
+
 class CausalWanAttentionBlock(nn.Module):
     def __init__(self, cross_attn_type, dim, ffn_dim, num_heads, local_attn_size=-1, sink_size=0, qk_norm=True, cross_attn_norm=False, eps=1e-6, additional_emb_length=None):
         super().__init__()
         self.dim = dim
         self.ffn_dim = ffn_dim
         self.num_heads = num_heads
-        self.local_attn_size = local_attn_size
-        self.qk_norm = qk_norm
-        self.cross_attn_norm = cross_attn_norm
+        self.qk_norm = qk_norm 
         self.eps = eps
         
         self.norm1 = WanLayerNorm(dim, eps)
@@ -338,14 +309,10 @@ class CausalFusionAttentionBlock(nn.Module):
         self.vid_block = vid_block
         self.audio_block = audio_block
         
-        # Configuration for Fusion Logic (Saved as dicts)
-        # Note the cross-wiring:
-        # Vid Block Fusion -> Queries Audio KV -> Needs Audio Config
         self.vid_fusion_props = {
             'local_attn_size': audio_block.self_attn.local_attn_size,
             'sink_size': audio_block.self_attn.sink_size
         }
-        # Audio Block Fusion -> Queries Video KV -> Needs Video Config
         self.aud_fusion_props = {
             'local_attn_size': vid_block.self_attn.local_attn_size,
             'sink_size': vid_block.self_attn.sink_size
@@ -367,9 +334,9 @@ class CausalFusionAttentionBlock(nn.Module):
     ):
         cs_vid = current_start_vid
         cs_aud = current_start_audio
-        
-        vid_e_chunks = kwargs['vid_e'].chunk(6, dim=2)
-        audio_e_chunks = kwargs['audio_e'].chunk(6, dim=2)
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            vid_e_chunks = kwargs['vid_e'].chunk(6, dim=2)
+            audio_e_chunks = kwargs['audio_e'].chunk(6, dim=2)
         
         # === 1. Audio Self ===
         audio_norm = self.audio_block.norm1(audio).bfloat16() * (1 + audio_e_chunks[1].squeeze(2)) + audio_e_chunks[0].squeeze(2)
@@ -378,7 +345,8 @@ class CausalFusionAttentionBlock(nn.Module):
             seq_lens=kwargs['audio_seq_lens'], grid_sizes=kwargs['audio_grid_sizes'], freqs=kwargs['audio_freqs'],
             block_mask=audio_self_mask, kv_cache=audio_self_cache, current_start=cs_aud, cache_start=cache_start
         )
-        audio = audio + audio_y * audio_e_chunks[2].squeeze(2)
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            audio = audio + audio_y * audio_e_chunks[2].squeeze(2)
 
         # === 2. Video Self ===
         vid_norm = self.vid_block.norm1(vid).bfloat16() * (1 + vid_e_chunks[1].squeeze(2)) + vid_e_chunks[0].squeeze(2)
@@ -387,17 +355,17 @@ class CausalFusionAttentionBlock(nn.Module):
             seq_lens=kwargs['vid_seq_lens'], grid_sizes=kwargs['vid_grid_sizes'], freqs=kwargs['vid_freqs'],
             block_mask=vid_self_mask, kv_cache=vid_self_cache, current_start=cs_vid, cache_start=cache_start
         )
-        vid = vid + vid_y * vid_e_chunks[2].squeeze(2)
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            vid = vid + vid_y * vid_e_chunks[2].squeeze(2)
 
         # === 3. Cross Attention ===
         og_audio = audio
         
-        # --- Audio Block Cross (Text + Video) ---
+        # --- Audio Block Cross ---
+        audio_norm_cross = self.audio_block.norm3(audio)
         audio_text_unproj, audio_q_proj = self.audio_block.cross_attn(
-            self.audio_block.norm3(audio), context=audio_context, context_lens=audio_context_lens, crossattn_cache=audio_text_cache 
+            audio_norm_cross, context=audio_context, context_lens=audio_context_lens, crossattn_cache=audio_text_cache 
         )
-        # Fusion: Audio Q queries Video KV
-        # Weights are in self.audio_block.cross_attn (injected)
         audio_vid_unproj = causal_fusion_logic(
             module_container=self.audio_block.cross_attn,
             q_src=audio_q_proj, target_seq=vid,
@@ -410,12 +378,11 @@ class CausalFusionAttentionBlock(nn.Module):
         )
         audio_cross_out = self.audio_block.cross_attn.o(audio_text_unproj + audio_vid_unproj)
 
-        # --- Video Block Cross (Text + Audio) ---
+        # --- Video Block Cross ---
+        vid_norm_cross = self.vid_block.norm3(vid)
         vid_text_unproj, vid_q_proj = self.vid_block.cross_attn(
-            self.vid_block.norm3(vid), context=vid_context, context_lens=vid_context_lens, crossattn_cache=vid_text_cache
+            vid_norm_cross, context=vid_context, context_lens=vid_context_lens, crossattn_cache=vid_text_cache
         )
-        # Fusion: Video Q queries Audio KV
-        # Weights are in self.vid_block.cross_attn (injected)
         vid_audio_unproj = causal_fusion_logic(
             module_container=self.vid_block.cross_attn,
             q_src=vid_q_proj, target_seq=og_audio, 
@@ -433,13 +400,15 @@ class CausalFusionAttentionBlock(nn.Module):
         audio_ffn = self.audio_block.ffn(
             self.audio_block.norm2(audio).bfloat16() * (1 + audio_e_chunks[4].squeeze(2)) + audio_e_chunks[3].squeeze(2)
         )
-        audio = audio + audio_ffn * audio_e_chunks[5].squeeze(2)
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            audio = audio + audio_ffn * audio_e_chunks[5].squeeze(2)
         
         vid = vid + vid_cross_out
         vid_ffn = self.vid_block.ffn(
             self.vid_block.norm2(vid).bfloat16() * (1 + vid_e_chunks[4].squeeze(2)) + vid_e_chunks[3].squeeze(2)
         )
-        vid = vid + vid_ffn * vid_e_chunks[5].squeeze(2)
+        with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+            vid = vid + vid_ffn * vid_e_chunks[5].squeeze(2)
 
         return vid, audio
 
@@ -492,21 +461,24 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
             )
             self.fusion_blocks.append(CausalFusionAttentionBlock(vid_blk, aud_blk))
         
-        # Inject Fusion Weights (Matches Ovi.py structure)
         self.inject_cross_attention_kv_projections()
         
         self.set_rope_params()
-        self.gradient_checkpointing = vc['gradient_checkpointing'] and ac['gradient_checkpointing']
-        logger.info(f"Initialized CausalFusionModel with gradient checkpointing = {self.gradient_checkpointing}")
+        self.gradient_checkpointing = vc.get('gradient_checkpointing', False) and ac.get('gradient_checkpointing', False)
+        logger.info(f"Initialized CausalFusionModel with gradient checkpointing = {self.gradient_checkpointing}") if not dist.is_initialized() or dist.get_rank() == 0 else None
         
+        self.vid_tokens_per_frame = 880
+        self.aud_tokens_per_frame = 1
+
         self.vid_self_mask = None
         self.audio_self_mask = None
         self.vid_cross_mask = None
         self.audio_cross_mask = None
 
-        self.independent_first_frame = True 
-        self.num_frame_per_block_vid = 3
-        self.num_frame_per_block_aud = 15
+        # [UPDATED CONFIGURATION FOR 32F/160T]
+        self.independent_first_frame = False 
+        self.num_frame_per_block_vid = 4  # 32/8 = 4
+        self.num_frame_per_block_aud = 20 # 160/8 = 20
         self.num_aud_frame_per_vid = self.num_frame_per_block_aud // self.num_frame_per_block_vid
 
     def inject_cross_attention_kv_projections(self):
@@ -514,13 +486,11 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
             vid_block = fusion_block.vid_block
             audio_block = fusion_block.audio_block
             
-            # Inject weights into Video Block's Cross Attn (for querying Audio)
             vid_block.cross_attn.k_fusion = nn.Linear(vid_block.dim, vid_block.dim)
             vid_block.cross_attn.v_fusion = nn.Linear(vid_block.dim, vid_block.dim)
             vid_block.cross_attn.pre_attn_norm_fusion = WanLayerNorm(vid_block.dim, elementwise_affine=True)
             vid_block.cross_attn.norm_k_fusion = WanRMSNorm(vid_block.dim, eps=1e-6) if vid_block.qk_norm else nn.Identity()
             
-            # Inject weights into Audio Block's Cross Attn (for querying Video)
             audio_block.cross_attn.k_fusion = nn.Linear(audio_block.dim, audio_block.dim)
             audio_block.cross_attn.v_fusion = nn.Linear(audio_block.dim, audio_block.dim)
             audio_block.cross_attn.pre_attn_norm_fusion = WanLayerNorm(audio_block.dim, elementwise_affine=True)
@@ -537,13 +507,11 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
     def init_weights(self):
         nn.init.zeros_(self.video_head.head.weight)
         nn.init.zeros_(self.audio_head.head.weight)
-        # Init injected fusion weights (Xavier)
         for name, mod in self.named_modules():
             if ("k_fusion" in name or "v_fusion" in name) and isinstance(mod, nn.Linear):
                 nn.init.xavier_uniform_(mod.weight)
                 if mod.bias is not None: nn.init.zeros_(mod.bias)
             if "fusion" in name and isinstance(mod, nn.Linear):
-                # Scale down fusion layers slightly as in Ovi
                 with torch.no_grad(): mod.weight.div_(10.0)
 
     @staticmethod
@@ -556,37 +524,26 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
         return block_indices
 
     def _prepare_masks(self, device, vid_shape, audio_shape, local_attn_size=-1, sink_size=0):
-        # Implementation is identical to causal_ovi.py
         C_vid, F_vid, H_vid, W_vid = vid_shape
         L_aud, D_aud = audio_shape
         
         vid_tokens_per_frame = (H_vid * W_vid) // (self.video_config['patch_size'][1] * self.video_config['patch_size'][2])
         
-        vid_block_structure = []
-        if self.independent_first_frame:
-            vid_block_structure.append(1 * vid_tokens_per_frame)
-            remaining = F_vid - 1
-        else:
-            remaining = F_vid
-        while remaining > 0:
-            c = min(self.num_frame_per_block_vid, remaining)
-            vid_block_structure.append(c * vid_tokens_per_frame)
-            remaining -= c
-        total_vid_tokens = sum(vid_block_structure)
+        # [UPDATED] Fixed Block Structure: 8 blocks of 4 frames / 20 tokens
+        num_blocks = 8
+        vid_block_structure = [self.num_frame_per_block_vid * vid_tokens_per_frame] * num_blocks
+        aud_block_structure = [self.num_frame_per_block_aud] * num_blocks
         
-        aud_block_structure = []
-        num_vid_blocks = len(vid_block_structure)
-        current_aud = 0
-        for i in range(num_vid_blocks):
-            size = 5 if i == 0 else 15
-            aud_block_structure.append(size)
-            current_aud += size
-        diff = L_aud - current_aud  
-        if diff != 0:   
-            aud_block_structure[-1] += diff
-            if aud_block_structure[-1] < 0: aud_block_structure = [L_aud]
-        total_aud_tokens = sum(aud_block_structure)
+        total_vid_tokens = sum(vid_block_structure) # 32 * TPF
+        total_aud_tokens = sum(aud_block_structure) # 160
         
+        # [UPDATED] Valid Data Boundaries (Padding Logic)
+        # Video: 32 total, 31 valid. Index >= 31*TPF is padding.
+        valid_vid_tokens = 31 * vid_tokens_per_frame
+        # Audio: 160 total, 157 valid. Index >= 157 is padding.
+        valid_aud_tokens = 157
+        
+        # Ends & Maps Construction
         vid_ends = torch.zeros(total_vid_tokens, device=device, dtype=torch.long)   
         aud_ends = torch.zeros(total_aud_tokens, device=device, dtype=torch.long)   
         def fill_ends(structure, out_ends):
@@ -606,6 +563,7 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
             map_aud_to_vid[a_ptr : a_next] = v_next 
             v_ptr, a_ptr = v_next, a_next
 
+        # Padding for FlexAttention Alignment (128)
         pad_vid = math.ceil(total_vid_tokens / 128) * 128 - total_vid_tokens    
         pad_aud = math.ceil(total_aud_tokens / 128) * 128 - total_aud_tokens    
         def extend(t, pad, val=0): 
@@ -616,33 +574,54 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
         map_vid_to_aud = extend(map_vid_to_aud, pad_vid)    
         map_aud_to_vid = extend(map_aud_to_vid, pad_aud)    
         
-        # Config reading
         window_size_v = local_attn_size * vid_tokens_per_frame if local_attn_size != -1 else -1
         window_size_a = (local_attn_size * self.num_aud_frame_per_vid) * 1 if local_attn_size !=-1 else -1
         sink_size_v = self.sink_size_v * vid_tokens_per_frame
         sink_size_a = self.sink_size_a * 1
 
-        def self_mask(ends, total_len, window_size, sink_size):
+        # [UPDATED] Mask Logic with Valid Length check
+        def self_mask(ends, total_len, window_size, sink_size, valid_len):
             def fn(b, h, q, k):
+                # 1. Padding: Only attend to/from valid tokens
+                is_valid = (q < valid_len) & (k < valid_len)
+                
+                # 2. Block Causal & Window/Sink
+                base = (q < total_len) & (k < total_len) & (k <= ends[q])
                 if window_size != -1:
-                    return (q < total_len) & (k < total_len) & ((k <= ends[q]) & (k >= (ends[q] - window_size)) | (k <= sink_size))
-                else:
-                    return (q < total_len) & (k < total_len) & ((k <= ends[q]))
+                    base = base & ((k >= (ends[q] - window_size)) | (k < sink_size))
+                
+                return is_valid & base
             return fn
             
-        def cross_mask(mapper, total_q, total_k, window_size, sink_size):
+        def cross_mask(mapper, total_q, total_k, window_size, sink_size, valid_q_len, valid_k_len):
             def fn(b, h, q, k):
+                # 1. Padding
+                is_valid = (q < valid_q_len) & (k < valid_k_len)
+                
+                # 2. Block Causal & Window/Sink
+                base = (q < total_q) & (k < total_k) & (k <= mapper[q])
                 if window_size != -1:
-                    return (q < total_q) & (k < total_k) & ((k <= mapper[q]) & (k >= (mapper[q] - window_size)) | (k <= sink_size))
-                else:
-                    return (q < total_q) & (k < total_k) & (k <= mapper[q])
+                    base = base & ((k >= (mapper[q] - window_size)) | (k < sink_size))
+                
+                return is_valid & base
             return fn
             
-        self.vid_self_mask = create_block_mask(self_mask(vid_ends, total_vid_tokens, window_size_v, sink_size_v), B=None, H=None, Q_LEN=total_vid_tokens+pad_vid, KV_LEN=total_vid_tokens+pad_vid, _compile=False, device=device)
-        self.audio_self_mask = create_block_mask(self_mask(aud_ends, total_aud_tokens, window_size_a, sink_size_a), B=None, H=None, Q_LEN=total_aud_tokens+pad_aud, KV_LEN=total_aud_tokens+pad_aud, _compile=False, device=device)
-        self.vid_cross_mask = create_block_mask(cross_mask(map_vid_to_aud, total_vid_tokens, total_aud_tokens, window_size_a, sink_size_a), B=None, H=None, Q_LEN=total_vid_tokens+pad_vid, KV_LEN=total_aud_tokens+pad_aud, _compile=False, device=device)
-        self.audio_cross_mask = create_block_mask(cross_mask(map_aud_to_vid, total_aud_tokens, total_vid_tokens, window_size_v, sink_size_v), B=None, H=None, Q_LEN=total_aud_tokens+pad_aud, KV_LEN=total_vid_tokens+pad_vid, _compile=False, device=device)
-
+        self.vid_self_mask = create_block_mask(
+            self_mask(vid_ends, total_vid_tokens, window_size_v, sink_size_v, valid_vid_tokens), 
+            B=None, H=None, Q_LEN=total_vid_tokens+pad_vid, KV_LEN=total_vid_tokens+pad_vid, _compile=False, device=device
+        )
+        self.audio_self_mask = create_block_mask(
+            self_mask(aud_ends, total_aud_tokens, window_size_a, sink_size_a, valid_aud_tokens), 
+            B=None, H=None, Q_LEN=total_aud_tokens+pad_aud, KV_LEN=total_aud_tokens+pad_aud, _compile=False, device=device
+        )
+        self.vid_cross_mask = create_block_mask(
+            cross_mask(map_vid_to_aud, total_vid_tokens, total_aud_tokens, window_size_a, sink_size_a, valid_vid_tokens, valid_aud_tokens), 
+            B=None, H=None, Q_LEN=total_vid_tokens+pad_vid, KV_LEN=total_aud_tokens+pad_aud, _compile=False, device=device
+        )
+        self.audio_cross_mask = create_block_mask(
+            cross_mask(map_aud_to_vid, total_aud_tokens, total_vid_tokens, window_size_v, sink_size_v, valid_aud_tokens, valid_vid_tokens), 
+            B=None, H=None, Q_LEN=total_aud_tokens+pad_aud, KV_LEN=total_vid_tokens+pad_vid, _compile=False, device=device
+        )
         if not dist.is_initialized() or dist.get_rank() == 0:
             print(f"Video self attention mask: {self.vid_self_mask}")
             print(f"Audio self attention mask: {self.audio_self_mask}")
@@ -654,56 +633,78 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
             import cv2
             from torch.nn.attention.flex_attention import create_mask
 
-            # 1. Video Self Mask (修正：使用 vid 参数)
-            # shape: [27392, 27392]
-            vid_self_dense = create_mask(
-                self_mask(vid_ends, total_vid_tokens, window_size_v, sink_size_v), # <--- 改为 vid
-                B=None, H=None, 
-                Q_LEN=total_vid_tokens+pad_vid,   # <--- 改为 vid
-                KV_LEN=total_vid_tokens+pad_vid,  # <--- 改为 vid
-                _compile=False, device=device
-            )
-            # 建议使用 INTER_NEAREST 保持二值化清晰度
-            vid_self_save = cv2.resize(vid_self_dense[0, 0].cpu().float().numpy(), (1024, 1024), interpolation=cv2.INTER_NEAREST)
-            imageio.imwrite(f"vid_self_mask.jpg", np.uint8(255. * vid_self_save))
+            def save_mask_img(name, mask_fn, q_len, kv_len):
+                dense_mask = create_mask(mask_fn, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len, device=device)
+                img = cv2.resize(dense_mask[0, 0].cpu().float().numpy(), (1024, 1024), interpolation=cv2.INTER_NEAREST)
+                imageio.imwrite(f"{name}_mask.jpg", np.uint8(255. * img))
 
-            # 2. Audio Self Mask (原本就是对的)
-            aud_self_dense = create_mask(
-                self_mask(aud_ends, total_aud_tokens, window_size_a, sink_size_a), 
-                B=None, H=None, 
-                Q_LEN=total_aud_tokens+pad_aud, 
-                KV_LEN=total_aud_tokens+pad_aud, 
-                _compile=False, device=device
-            )
-            aud_self_save = cv2.resize(aud_self_dense[0, 0].cpu().float().numpy(), (1024, 1024), interpolation=cv2.INTER_NEAREST)
-            imageio.imwrite(f"aud_self_mask.jpg", np.uint8(255. * aud_self_save))
+            save_mask_img("vid_self", self_mask(vid_ends, total_vid_tokens, window_size_v, sink_size_v, valid_vid_tokens), total_vid_tokens+pad_vid, total_vid_tokens+pad_vid)
+            save_mask_img("aud_self", self_mask(aud_ends, total_aud_tokens, window_size_a, sink_size_a, valid_aud_tokens), total_aud_tokens+pad_aud, total_aud_tokens+pad_aud)
+            save_mask_img("vid_cross", cross_mask(map_vid_to_aud, total_vid_tokens, total_aud_tokens, window_size_a, sink_size_a, valid_vid_tokens, valid_aud_tokens), total_vid_tokens+pad_vid, total_aud_tokens+pad_aud)
+            save_mask_img("aud_cross", cross_mask(map_aud_to_vid, total_aud_tokens, total_vid_tokens, window_size_v, sink_size_v, valid_aud_tokens, valid_vid_tokens), total_aud_tokens+pad_aud, total_vid_tokens+pad_vid)
             
-            # 3. Video Cross Mask (原本是对的，Vid 查询 Aud)
-            vid_cross_dense = create_mask(
-                cross_mask(map_vid_to_aud, total_vid_tokens, total_aud_tokens, window_size_a, sink_size_a), 
-                B=None, H=None, 
-                Q_LEN=total_vid_tokens+pad_vid, 
-                KV_LEN=total_aud_tokens+pad_aud, 
-                _compile=False, device=device
-            )
-            vid_cross_save = cv2.resize(vid_cross_dense[0, 0].cpu().float().numpy(), (1024, 1024), interpolation=cv2.INTER_NEAREST)
-            imageio.imwrite(f"vid_cross_mask.jpg", np.uint8(255. * vid_cross_save))
+
+    def _prepare_masks_debug(self, device, vid_shape, audio_shape, local_attn_size=-1, sink_size=0):
+        """
+        Bidirectional mask only for debugging purpose in causal_ovi.py
+        """
+        C_vid, F_vid, H_vid, W_vid = vid_shape
+        L_aud, D_aud = audio_shape
+        
+        vid_tokens_per_frame = (H_vid * W_vid) // (self.video_config['patch_size'][1] * self.video_config['patch_size'][2])
+        total_vid_tokens = 32 * vid_tokens_per_frame
+        total_aud_tokens = 160
+        valid_vid_tokens = 31 * vid_tokens_per_frame
+        valid_aud_tokens = 157
+        pad_vid = math.ceil(total_vid_tokens / 128) * 128 - total_vid_tokens    
+        pad_aud = math.ceil(total_aud_tokens / 128) * 128 - total_aud_tokens    
+        def bidirectional_self_mask(valid_len):
+            def fn(b, h, q, k):
+                return (q < valid_len) & (k < valid_len)
+            return fn
             
-            # 4. Audio Cross Mask (修正：Aud 查询 Vid，需要用 map_aud_to_vid)
-            aud_cross_dense = create_mask(
-                cross_mask(map_aud_to_vid, total_aud_tokens, total_vid_tokens, window_size_v, sink_size_v), # <--- 改为 map_aud_to_vid
-                B=None, H=None, 
-                Q_LEN=total_aud_tokens+pad_aud,   # <--- Aud 是 Query
-                KV_LEN=total_vid_tokens+pad_vid,  # <--- Vid 是 Key
-                _compile=False, device=device
-            )
-            aud_cross_save = cv2.resize(aud_cross_dense[0, 0].cpu().float().numpy(), (1024, 1024), interpolation=cv2.INTER_NEAREST)
-            imageio.imwrite(f"aud_cross_mask.jpg", np.uint8(255. * aud_cross_save))
+        def bidirectional_cross_mask(valid_q_len, valid_k_len):
+            def fn(b, h, q, k):
+                return (q < valid_q_len) & (k < valid_k_len)
+            return fn
+
+        self.vid_self_mask = create_block_mask(
+            bidirectional_self_mask(valid_vid_tokens), 
+            B=None, H=None, Q_LEN=total_vid_tokens+pad_vid, KV_LEN=total_vid_tokens+pad_vid, _compile=False, device=device
+        )
+        self.audio_self_mask = create_block_mask(
+            bidirectional_self_mask(valid_aud_tokens), 
+            B=None, H=None, Q_LEN=total_aud_tokens+pad_aud, KV_LEN=total_aud_tokens+pad_aud, _compile=False, device=device
+        )
+        self.vid_cross_mask = create_block_mask(
+            bidirectional_cross_mask(valid_vid_tokens, valid_aud_tokens), 
+            B=None, H=None, Q_LEN=total_vid_tokens+pad_vid, KV_LEN=total_aud_tokens+pad_aud, _compile=False, device=device
+        )
+        self.audio_cross_mask = create_block_mask(
+            bidirectional_cross_mask(valid_aud_tokens, valid_vid_tokens), 
+            B=None, H=None, Q_LEN=total_aud_tokens+pad_aud, KV_LEN=total_vid_tokens+pad_vid, _compile=False, device=device
+        )
+
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            import imageio
+            import numpy as np
+            import cv2
+            from torch.nn.attention.flex_attention import create_mask
+
+            def save_mask_img(name, mask_fn, q_len, kv_len):
+                dense_mask = create_mask(mask_fn, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len, device=device)
+                img = cv2.resize(dense_mask[0, 0].cpu().float().numpy(), (1024, 1024), interpolation=cv2.INTER_NEAREST)
+                imageio.imwrite(f"{name}_debug_mask.jpg", np.uint8(255. * img))
+
+            save_mask_img("vid_self", bidirectional_self_mask(valid_vid_tokens), total_vid_tokens+pad_vid, total_vid_tokens+pad_vid)
+            save_mask_img("aud_self", bidirectional_self_mask(valid_aud_tokens), total_aud_tokens+pad_aud, total_aud_tokens+pad_aud)
+            save_mask_img("vid_cross", bidirectional_cross_mask(valid_vid_tokens, valid_aud_tokens), total_vid_tokens+pad_vid, total_aud_tokens+pad_aud)
+            save_mask_img("aud_cross", bidirectional_cross_mask(valid_aud_tokens, valid_vid_tokens), total_aud_tokens+pad_aud, total_vid_tokens+pad_vid)
+
     # -------------------------------------------------------------------------
     # Wrappers
     # -------------------------------------------------------------------------
-    def prepare_transformer_block_kwargs(self, x, t, context, seq_len, is_video, first_frame_is_clean):
-        # ... (Identical to causal_ovi.py)
+    def prepare_transformer_block_kwargs(self, x, t, context, seq_len, is_video, first_frame_is_clean, clip_fea=None, y=None, proj_layer=None):
         if is_video:
             patch_embedding, text_embedding = self.video_patch_embedding, self.video_text_embedding
             text_len, freqs, time_embedding, time_projection, dim = self.video_config['text_len'], self.video_freqs, self.video_time_embedding, self.video_time_projection, self.video_config['dim']
@@ -716,6 +717,9 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
             if is_video: self.video_freqs = freqs.to(device)
             else: self.audio_freqs = freqs.to(device)
             freqs = freqs.to(device)
+
+        if y is not None:
+            x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
         x = [patch_embedding(u.unsqueeze(0)) for u in x]
         
@@ -737,15 +741,31 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
                 for i in range(t.size(0)): t[i, :_first_images_seq_len[i]] = 0
             else:
                 t = t.unsqueeze(1).expand(t.size(0), cur_seq_len)
-            
-        bt = t.size(0)
-        t_flat = t.flatten()
-        f_dim = self.video_config['freq_dim'] if is_video else self.audio_config['freq_dim']
-        e = time_embedding(sinusoidal_embedding_1d(f_dim, t_flat).type_as(x).unflatten(0, (bt, cur_seq_len)))
-        e0 = time_projection(e).unflatten(2, (6, dim))
+        else:
+            tokens_per_frame = self.vid_tokens_per_frame if is_video else self.aud_tokens_per_frame
+            t = t.unsqueeze(-1).repeat(1, 1, tokens_per_frame).flatten(1, 2)
+            # for video, original t.shape: [B, F], now t.shape: [B, F*880]
+            # for audio, original t.shape: [B, L], now t.shape: [B, L]
+            if first_frame_is_clean and is_video:
+                t[:, :tokens_per_frame] = 0 
+        
+        # print(f"In causal Ovi, t shape: {t.shape}, is_video: {is_video}, first_frame_is_clean:{first_frame_is_clean}, t: {t}")
+        with amp.autocast('cuda', dtype=torch.bfloat16):
+            bt = t.size(0)
+            t_flat = t.flatten()
+            f_dim = self.video_config['freq_dim'] if is_video else self.audio_config['freq_dim']
+            e = time_embedding(sinusoidal_embedding_1d(f_dim, t_flat).type_as(x).unflatten(0, (bt, cur_seq_len)))
+            e0 = time_projection(e).unflatten(2, (6, dim))
         
         context = text_embedding(torch.stack([torch.cat([u, u.new_zeros(text_len - u.size(0), u.size(1))]) for u in context]))
         
+        if clip_fea is not None:
+            if proj_layer is not None:
+                context_clip = proj_layer(clip_fea)
+                context = torch.concat([context_clip, context], dim=1)
+            else:
+                logger.warning("clip_fea provided but no proj_layer found. Ignoring clip_fea.")
+
         return x, e, dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes, freqs=freqs, context=context)
 
     def post_transformer_block_out(self, x, grid_sizes, e, is_video):
@@ -764,17 +784,19 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
             x = out
         return [u.bfloat16() for u in x]
 
-    def _forward_train(self, vid, audio, t, vid_context, audio_context, vid_seq_len, audio_seq_len, 
-                       first_frame_is_clean=False, slg_layer=False, **kwargs):
+    def _forward_train(self, vid, audio, t_vid, t_aud, vid_context, audio_context, vid_seq_len, audio_seq_len, 
+                       clip_fea=None, clip_fea_audio=None, y=None, first_frame_is_clean=False, slg_layer=False, **kwargs):
         if self.vid_self_mask is None:
-            self._prepare_masks(vid[0].device, vid.shape, audio.shape)
-            
+            self._prepare_masks(vid[0].device, vid[0].shape, audio[0].shape)
+            # self._prepare_masks_debug(vid[0].device, vid[0].shape, audio[0].shape)
+        
         vid_inp, vid_e_base, vid_kwargs = self.prepare_transformer_block_kwargs(
-            x=vid, t=t, context=vid_context, seq_len=vid_seq_len, is_video=True, first_frame_is_clean=first_frame_is_clean
+            vid, t_vid, vid_context, vid_seq_len, True, first_frame_is_clean, 
+            clip_fea=clip_fea, y=y, proj_layer=getattr(self, 'video_img_emb', None)
         )
-
         audio_inp, audio_e_base, audio_kwargs = self.prepare_transformer_block_kwargs(
-            x=audio, t=t, context=audio_context, seq_len=audio_seq_len, is_video=False, first_frame_is_clean=False
+            audio, t_aud, audio_context, audio_seq_len, False, False, 
+            clip_fea=clip_fea_audio, y=None, proj_layer=None
         )
         
         all_kwargs = {
@@ -789,13 +811,14 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
         }
 
         vid_h, audio_h = vid_inp, audio_inp
-        for block in self.fusion_blocks:
+        for i, block in enumerate(self.fusion_blocks):
             if slg_layer > 0 and i == slg_layer: continue
+            
             vid_h, audio_h = gradient_checkpointing(
                 block, 
                 vid_h, 
                 audio_h, 
-                enabled=self.training and self.gradient_checkpointing,
+                enabled=self.gradient_checkpointing,
                 **all_kwargs
             )
                 
@@ -803,15 +826,17 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
         audio_out = self.post_transformer_block_out(audio_h, audio_kwargs['grid_sizes'], audio_e_base, False)
         return vid_out, audio_out 
 
-    def _forward_inference(self, vid, audio, t, vid_context, audio_context, vid_seq_len, audio_seq_len,
-                           kv_cache_list=None, current_start_vid=0, current_start_audio=0,
-                           first_frame_is_clean=False, slg_layer=False, **kwargs):
+    def _forward_inference(self, vid, audio, t_vid, t_aud, vid_context, audio_context, vid_seq_len, audio_seq_len,
+                           kv_cache_list=None, current_start_vid=0, current_start_audio=0, 
+                           clip_fea=None, clip_fea_audio=None, y=None, first_frame_is_clean=False, slg_layer=False, **kwargs):
+        
         vid_inp, vid_e_base, vid_kwargs = self.prepare_transformer_block_kwargs(
-            x=vid, t=t, context=vid_context, seq_len=vid_seq_len, is_video=True, first_frame_is_clean=first_frame_is_clean
+            vid, t_vid, vid_context, vid_seq_len, True, first_frame_is_clean,
+            clip_fea=clip_fea, y=y, proj_layer=getattr(self, 'video_img_emb', None)
         )
-
         audio_inp, audio_e_base, audio_kwargs = self.prepare_transformer_block_kwargs(
-            x=audio, t=t, context=audio_context, seq_len=audio_seq_len, is_video=False, first_frame_is_clean=False
+            audio, t_aud, audio_context, audio_seq_len, False, False,
+            clip_fea=clip_fea_audio, y=None, proj_layer=None
         )
         
         all_kwargs = {
@@ -828,6 +853,7 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
         vid_h, audio_h = vid_inp, audio_inp
         for i, block in enumerate(self.fusion_blocks):
             if slg_layer > 0 and i == slg_layer: continue
+            
             caches = kv_cache_list[i]
             vid_h, audio_h = gradient_checkpointing(
                 block, 
@@ -851,21 +877,14 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
             return self._forward_train(*args, **kwargs)
 
     def load_state_dict(self, state_dict, strict=True):
-        """
-        Load standard Ovi weights. 
-        Since we structure the model exactly like Ovi (injecting fusion into cross_attn),
-        standard FSDP clean-up is sufficient. No key remapping needed.
-        """
         new_state_dict = {}
         for key, value in state_dict.items():
-            # Standard cleanup
             new_key = key.replace("_fsdp_wrapped_module.", "")\
                          .replace("_checkpoint_wrapped_module.", "")\
                          .replace("_orig_mod.", "")
             if new_key.startswith("model."):
                 new_key = new_key[len("model."):]
             
-            # Map legacy separate model keys to fusion_blocks
             if new_key.startswith("video_model.blocks."):
                 parts = new_key.split('.')
                 block_idx = parts[2]

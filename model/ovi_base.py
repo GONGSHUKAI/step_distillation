@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class OviBaseModel(nn.Module):
     def __init__(self, args, device):
         super().__init__()
-        self.is_causal = False
+        self.is_causal = getattr(args, "generator_type", "bidirectional") == "causal"
         self._initialize_models(args, device)
 
         self.device = device
