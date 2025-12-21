@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 class OviDMD(OviSelfForcingModel):
     def __init__(self, args, device):
         """
+        args: omegaconf's DictConf directly read from yaml file
         Initialize the OviDMD (Distribution Matching Distillation) module for Audio-Video models.
         This class is adapted to handle dual-branch (video and audio) models.
         It computes generator and fake score losses for both modalities in the forward pass.
