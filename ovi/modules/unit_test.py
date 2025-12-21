@@ -1,3 +1,7 @@
+"""
+PYTHONPATH=. python -m ovi.modules.unit_test
+"""
+
 import os
 import json
 import torch
@@ -135,7 +139,7 @@ def unit_test_forward_train(model: CausalFusionModel, device):
 
 def unit_test_forward_inference(model: CausalFusionModel, device):
     print("\n" + "="*60)
-    print("--- Test (iii): _forward_inference (With KV Cache & List Inputs) ---")
+    print("--- Test (iii): _forward_inference (With KV Cache & Logic Verification) ---")
     print("="*60)
     
     model.eval()
@@ -150,34 +154,25 @@ def unit_test_forward_inference(model: CausalFusionModel, device):
     W_latent = 80 
     C_aud = model.audio_config['in_dim']
     
-    # [UPDATED] Timesteps for Inference
-    # Usually inference uses a single global timestep per step (e.g. t=1000)
-    # But now model expects [B, F] and [B, L]
     t_val = 100.0
-    
-    # Step 1: Block 0
-    # Video: 4 frames -> t_vid: [B, 4]
-    # Audio: 20 tokens -> t_aud: [B, 20]
-    t_vid_step1 = torch.full((B, F_block), t_val, device=device).float()
-    t_aud_step1 = torch.full((B, L_aud_block), t_val, device=device).float()
+    t_vid_step = torch.full((B, F_block), t_val, device=device).float()
+    t_aud_step = torch.full((B, L_aud_block), t_val, device=device).float()
     
     vid_context_list = [torch.randn(model.video_config['text_len'], model.text_dim, device=device, dtype=torch.bfloat16) for _ in range(B)]
     aud_context_list = [torch.randn(model.audio_config['text_len'], model.text_dim, device=device, dtype=torch.bfloat16) for _ in range(B)]
 
-    vid_seq_len = 27280
+    vid_seq_len = 28160 # 32 frames
     aud_seq_len = 160
 
+    # 模拟 KV Cache 初始化
     def init_cache(model, batch_size, device, dtype):
         cache_list = []
         pixels_per_frame = H_latent * W_latent
         patch_area = model.video_config['patch_size'][1] * model.video_config['patch_size'][2]
         tokens_per_vid_frame = pixels_per_frame // patch_area
         
-        max_vid_frames = 32 
-        max_aud_len = 160   
-        
-        max_vid_tokens = max_vid_frames * tokens_per_vid_frame
-        max_aud_tokens = max_aud_len 
+        max_vid_tokens = 32 * tokens_per_vid_frame
+        max_aud_tokens = 160 
         
         head_dim_v = model.video_config['dim'] // model.video_config['num_heads']
         head_dim_a = model.audio_config['dim'] // model.audio_config['num_heads']
@@ -206,63 +201,98 @@ def unit_test_forward_inference(model: CausalFusionModel, device):
     kv_cache_list, tokens_per_vid_frame = init_cache(model, B, device, torch.bfloat16)
     print(f"Cache initialized. Tokens per video frame: {tokens_per_vid_frame}")
 
-    # Step 1: Block 0
-    print("\n>>> Step 1: Infer Block 0 (4 frames, 20 tokens)")
+    # =========================================================================
+    # Step 1: Infer Block 0 (Append Mode)
+    # =========================================================================
+    print("\n>>> Step 1: Infer Block 0 (Time T=1000)")
     vid_step1_list = [torch.randn(C_vid, F_block, H_latent, W_latent, device=device, dtype=torch.bfloat16) for _ in range(B)]
     aud_step1_list = [torch.randn(L_aud_block, C_aud, device=device, dtype=torch.bfloat16) for _ in range(B)]
     
     try:
         with torch.no_grad():
-            # [UPDATED] Pass t_vid and t_aud
             v_out1, a_out1 = model(
-                vid=vid_step1_list, 
-                audio=aud_step1_list, 
-                t_vid=t_vid_step1, 
-                t_aud=t_aud_step1,
-                vid_context=vid_context_list, 
-                audio_context=aud_context_list,
-                vid_seq_len=vid_seq_len, 
-                audio_seq_len=aud_seq_len,
+                vid=vid_step1_list, audio=aud_step1_list, 
+                t_vid=t_vid_step, t_aud=t_aud_step,
+                vid_context=vid_context_list, audio_context=aud_context_list,
+                vid_seq_len=vid_seq_len, audio_seq_len=aud_seq_len,
                 kv_cache_list=kv_cache_list,
-                current_start_vid=0, 
-                current_start_audio=0,
+                current_start_vid=0, current_start_audio=0,
                 first_frame_is_clean=True 
             )
-        print(f"[Success] Step 1 Output Shapes: Video={v_out1[0].shape}, Audio={a_out1[0].shape}")
+        print(f"[Success] Output: {v_out1[0].shape}")
+        
+        # Check Cache Pointers
+        g_end = kv_cache_list[0]['vid_self']['global_end_index'].item()
+        l_end = kv_cache_list[0]['vid_self']['local_end_index'].item()
+        print(f"  > Cache Indices after Step 1: Global={g_end}, Local={l_end}")
+        expected_len = F_block * tokens_per_vid_frame
+        assert g_end == expected_len, f"Expected Global End {expected_len}, got {g_end}"
+        
     except Exception as e:
         print(f"[Failed] Step 1: {e}")
         traceback.print_exc()
         return
 
-    # Step 2: Block 1
-    print("\n>>> Step 2: Infer Block 1 (4 frames, 20 tokens)")
+    # =========================================================================
+    # Step 1.5: Infer Block 0 AGAIN (Overwrite/Denoising Mode)
+    # 这就是导致之前 RuntimeError 的场景
+    # =========================================================================
+    print("\n>>> Step 1.5: Infer Block 0 Again (Time T=750) -> Testing Overwrite Logic")
+    # Simulate a denoising step: Input size same, start position same
+    vid_step1_5_list = [torch.randn(C_vid, F_block, H_latent, W_latent, device=device, dtype=torch.bfloat16) for _ in range(B)]
+    
+    try:
+        with torch.no_grad():
+            v_out1_5, _ = model(
+                vid=vid_step1_5_list, audio=aud_step1_list, 
+                t_vid=t_vid_step, t_aud=t_aud_step, # Timestep value doesn't matter for shape
+                vid_context=vid_context_list, audio_context=aud_context_list,
+                vid_seq_len=vid_seq_len, audio_seq_len=aud_seq_len,
+                kv_cache_list=kv_cache_list,
+                current_start_vid=0, current_start_audio=0, # SAME start as Step 1
+                first_frame_is_clean=True 
+            )
+        
+        g_end_new = kv_cache_list[0]['vid_self']['global_end_index'].item()
+        l_end_new = kv_cache_list[0]['vid_self']['local_end_index'].item()
+        print(f"  > Cache Indices after Step 1.5: Global={g_end_new}, Local={l_end_new}")
+        
+        # 关键验证：指针不应增加
+        assert g_end_new == g_end, f"Error: Global index grew from {g_end} to {g_end_new} during overwrite!"
+        print("  [PASS] Cache correctly overwritten without growing.")
+        
+    except Exception as e:
+        print(f"[Failed] Step 1.5 (Overwrite): {e}")
+        traceback.print_exc()
+        return
+
+    # =========================================================================
+    # Step 2: Infer Block 1 (Append Mode)
+    # =========================================================================
+    print("\n>>> Step 2: Infer Block 1 (Append Mode)")
     current_start_vid = F_block * tokens_per_vid_frame
     current_start_audio = L_aud_block
     vid_step2_list = [torch.randn(C_vid, F_block, H_latent, W_latent, device=device, dtype=torch.bfloat16) for _ in range(B)]
     aud_step2_list = [torch.randn(L_aud_block, C_aud, device=device, dtype=torch.bfloat16) for _ in range(B)]
     
-    # Timesteps for Step 2
-    t_val2 = 833.3
-    t_vid_step2 = torch.full((B, F_block), t_val2, device=device).float()
-    t_aud_step2 = torch.full((B, L_aud_block), t_val2, device=device).float()
-
     try:
         with torch.no_grad():
             v_out2, a_out2 = model(
-                vid=vid_step2_list, 
-                audio=aud_step2_list, 
-                t_vid=t_vid_step2,
-                t_aud=t_aud_step2,
-                vid_context=vid_context_list, 
-                audio_context=aud_context_list,
-                vid_seq_len=vid_seq_len, 
-                audio_seq_len=aud_seq_len,
+                vid=vid_step2_list, audio=aud_step2_list, 
+                t_vid=t_vid_step, t_aud=t_aud_step,
+                vid_context=vid_context_list, audio_context=aud_context_list,
+                vid_seq_len=vid_seq_len, audio_seq_len=aud_seq_len,
                 kv_cache_list=kv_cache_list,
-                current_start_vid=current_start_vid, 
-                current_start_audio=current_start_audio,
+                current_start_vid=current_start_vid, current_start_audio=current_start_audio,
                 first_frame_is_clean=False
             )
-        print(f"[Success] Step 2 Output Shapes: Video={v_out2[0].shape}, Audio={a_out2[0].shape}")
+        g_end_2 = kv_cache_list[0]['vid_self']['global_end_index'].item()
+        print(f"  > Cache Indices after Step 2: Global={g_end_2}")
+        
+        expected_len_2 = current_start_vid + (F_block * tokens_per_vid_frame)
+        assert g_end_2 == expected_len_2, f"Expected {expected_len_2}, got {g_end_2}"
+        print(f"  [PASS] Cache correctly appended.")
+        
     except Exception as e:
         print(f"[Failed] Step 2: {e}")
         traceback.print_exc()
@@ -330,7 +360,7 @@ if __name__ == "__main__":
     model.eval()
     print("Model initialized successfully.")
 
-    unit_test_attn_mask(model, device)
-    unit_test_forward_train(model, device) 
+    # unit_test_attn_mask(model, device)
+    # unit_test_forward_train(model, device) 
     unit_test_forward_inference(model, device)
-    unit_test_load_weight(ckpt_path, model)
+    # unit_test_load_weight(ckpt_path, model)

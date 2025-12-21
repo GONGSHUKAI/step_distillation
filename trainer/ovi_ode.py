@@ -6,6 +6,7 @@ from utils.dataset import OviODERegressionDataset, cycle
 from model.ovi_ode_regression import OviODERegression # <--- Will define this next
 from collections import defaultdict
 from utils.misc import set_seed, merge_dict_list
+from utils.ovi_wrapper import remap_ovi_state_dict_for_refactored
 import torch.distributed as dist
 from omegaconf import OmegaConf
 import torch
@@ -64,6 +65,19 @@ class Trainer:
         self.model = OviODERegression(config, device=self.device)
         logger.info(f"Finished initializing the distillation model.") if self.is_main_process else None
         
+        pretrained_ckpt_path, self.step = self.load(self.output_path)
+        if pretrained_ckpt_path is not None:
+            logger.info(f"Loading checkpoint from {pretrained_ckpt_path} at step {self.step}") if self.is_main_process else None
+            state_dict = torch.load(pretrained_ckpt_path, map_location="cpu")
+            self.model.generator.load_state_dict(state_dict["generator"], strict=True)
+            logger.info(f"Checkpoint at step {self.step} loaded") if self.is_main_process else None
+            # Free memory
+            del state_dict  
+            gc.collect()
+            torch.cuda.empty_cache()
+        else:
+            logger.info("No checkpoint found, training from scratch.") if self.is_main_process else None
+
         # FSDP Wrapping
         logger.info("Wrapping generator with FSDP...") if self.is_main_process else None
         # Ovi generator structure: self.model.generator.model (FusionModel) -> fusion_blocks
@@ -112,11 +126,31 @@ class Trainer:
         )
         self.dataloader = cycle(dataloader)
         logger.info(f"Finished setting up dataset and dataloader, dataset class name: {dataset.__class__.__name__}, size: {len(dataset)}, batch size: {config.batch_size}") if self.is_main_process else None
-        self.step = 0
 
         self.max_grad_norm = 10.0
         self.previous_time = None
 
+    def load(self, out_path):
+        # 1. Find latest checkpoint folder (ranked by step)
+        if not os.path.exists(out_path): 
+            return None, 0
+        ckpt_folders = [f for f in os.listdir(out_path) if f.startswith("checkpoint_model_")]
+        if not ckpt_folders: 
+            return None, 0
+        
+        def extract_step(folder_name):
+            import re
+            match = re.search(r"checkpoint_model_(\d+)", folder_name)
+            return int(match.group(1)) if match else -1
+        latest_ckpt_folder = sorted(ckpt_folders, key=extract_step)[-1]
+        
+        # 2. read model.pt and step
+        model_path = os.path.join(out_path, latest_ckpt_folder, "model.pt")
+        step = extract_step(latest_ckpt_folder)
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"{model_path} not found")
+        return model_path, step
+    
     def save(self):
         logger.info("Start gathering distributed model states...") if self.is_main_process else None
         state_dict = {"generator": fsdp_state_dict(self.model.generator)}
@@ -168,14 +202,14 @@ class Trainer:
             logger.info(f"Step {self.step}: ODE Loss={loss.item():.4f}, Video ODE Loss={wandb_log['video_loss']:.4f}, Audio ODE Loss={wandb_log['audio_loss']:.4f}, Grad Norm={wandb_log['grad_norm']}")
 
     def train(self):
+        start_step = self.step
         while True:
             self.train_one_step()
-            
+            self.step += 1
+
             if self.step > 0 and self.step % self.config.log_iters == 0:
                 self.save()
                 torch.cuda.empty_cache()
-            
-            self.step += 1
 
             if self.is_main_process:
                 current_time = time.time()
@@ -185,7 +219,7 @@ class Trainer:
                     if not self.disable_wandb:
                         wandb.log({"per iteration time": current_time - self.previous_time}, step=self.step)
                     self.previous_time = current_time
-                    
+
             if self.step % 100 == 0:
                 gc.collect()
                 torch.cuda.empty_cache()

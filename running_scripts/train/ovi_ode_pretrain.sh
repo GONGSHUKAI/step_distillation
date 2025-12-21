@@ -14,4 +14,4 @@ torchrun \
     --config_path configs/ovi_causal_ode.yaml \
     --logdir $LOGDIR \
     --no_visualize \
-    --disable-wandb
+    # --disable-wandb

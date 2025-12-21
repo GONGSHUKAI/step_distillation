@@ -24,13 +24,14 @@ import math
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
+is_main_process = not dist.is_initialized() or dist.get_rank() == 0
 
 class OviTextEncoder(torch.nn.Module):
     def __init__(self, model_name: str = "Wan2.2-TI2V-5B") -> None:
         super().__init__()
         self.model_name = model_name
         
-        logger.info("Initializing Ovi Text Encoder...") if dist.get_rank() == 0 else None
+        logger.info("Initializing Ovi Text Encoder...") if is_main_process else None
         self.text_encoder = umt5_xxl(
             encoder_only=True,
             return_tokenizer=False,
@@ -38,7 +39,7 @@ class OviTextEncoder(torch.nn.Module):
             device=torch.device('cpu')
         ).eval().requires_grad_(False)
 
-        logger.info("Ovi Text Encoder initialized, loading model weights...") if dist.get_rank() == 0 else None
+        logger.info("Ovi Text Encoder initialized, loading model weights...") if is_main_process else None
         self.text_encoder.load_state_dict(
             torch.load(f"/cpfs01/gongshukai/weights/Ovi/{self.model_name}/models_t5_umt5-xxl-enc-bf16.pth",
                        map_location='cpu', weights_only=False)
@@ -49,7 +50,7 @@ class OviTextEncoder(torch.nn.Module):
             seq_len=512, 
             clean='whitespace'
         )
-        logger.info(f"Ovi Text Encoder weights and tokenizer loaded.") if dist.get_rank() == 0 else None
+        logger.info(f"Ovi Text Encoder weights and tokenizer loaded.") if is_main_process else None
     
     @property
     def device(self):
@@ -111,7 +112,7 @@ class OviVAEWrapper(torch.nn.Module):
 
         self.video_dtype = torch.bfloat16
         
-        logger.info("Initializing Wan2.2-VAE...") if dist.get_rank() == 0 else None
+        logger.info("Initializing Wan2.2-VAE...") if is_main_process else None
         self.video_vae = (
             _video_vae_2_2(
                 pretrained_path=video_vae_pth,
@@ -123,11 +124,11 @@ class OviVAEWrapper(torch.nn.Module):
             .eval()
             .requires_grad_(False)
         )
-        logger.info(f"Loaded Wan2.2-VAE weights from {video_vae_pth}") if dist.get_rank() == 0 else None
+        logger.info(f"Loaded Wan2.2-VAE weights from {video_vae_pth}") if is_main_process else None
         
         # ===== 音频VAE (MMAudio) =====
         # 初始化时在CPU上
-        logger.info("Initializing MMAudio VAE and Vocoder...") if dist.get_rank() == 0 else None
+        logger.info("Initializing MMAudio VAE and Vocoder...") if is_main_process else None
         self.audio_vae = FeaturesUtils(
             mode=audio_mode,
             need_vae_encoder=True,
@@ -135,7 +136,7 @@ class OviVAEWrapper(torch.nn.Module):
             bigvgan_vocoder_ckpt=audio_bigvgan_ckpt,
         )
         self.audio_vae.eval().requires_grad_(False)
-        logger.info(f"Loaded MMAudio VAE weights from {audio_tod_vae_ckpt} and Vocoder weights from {audio_bigvgan_ckpt}") if dist.get_rank() == 0 else None
+        logger.info(f"Loaded MMAudio VAE weights from {audio_tod_vae_ckpt} and Vocoder weights from {audio_bigvgan_ckpt}") if is_main_process else None
     
     # ===== 视频VAE接口 =====
     def encode(self, pixel):
@@ -223,21 +224,22 @@ class OviFusionWrapper(torch.nn.Module):
             self.audio_config = json.load(f)
 
         if is_causal:
-            logger.info(f"Initializing CausalFusionModel: {self.video_config['num_layers']} video blocks and {self.audio_config['num_layers']} audio blocks...") if dist.get_rank() == 0 else None
+            logger.info(f"Initializing CausalFusionModel: {self.video_config['num_layers']} video blocks and {self.audio_config['num_layers']} audio blocks...") if is_main_process else None
             self.model = CausalFusionModel(self.video_config, self.audio_config).to(dtype=torch.bfloat16, device=torch.device('cpu'))
         else:
-            logger.info(f"Initializing FusionModel: {self.video_config['num_layers']} video blocks and {self.audio_config['num_layers']} audio blocks...") if dist.get_rank() == 0 else None
+            logger.info(f"Initializing FusionModel: {self.video_config['num_layers']} video blocks and {self.audio_config['num_layers']} audio blocks...") if is_main_process else None
             self.model = FusionModel(self.video_config, self.audio_config).to(dtype=torch.bfloat16, device=torch.device('cpu'))
 
         if model_path is not None:
-            logger.info(f"Ovi FusionModel initialized, loading model weights from {model_path}...") if dist.get_rank() == 0 else None
+            logger.info(f"Ovi FusionModel initialized, loading model weights from {model_path}...") if is_main_process else None
             if model_path.endswith(".pt"):
-                original_state_dict = torch.load(model_path, map_location='cpu')['generator_ema']
+                original_state_dict = torch.load(model_path, map_location='cpu')
+                original_state_dict = original_state_dict["generator_ema"] if "generator_ema" in original_state_dict.keys() else original_state_dict["generator"]
             else:
                 original_state_dict = load_file(model_path, device='cpu')
         else:
             model_path = f"/cpfs01/gongshukai/weights/Ovi/{self.model_name}/model_960x960.safetensors"
-            logger.info(f"Ovi FusionModel initialized, loading model weights from {model_path}...") if dist.get_rank() == 0 else None
+            logger.info(f"Ovi FusionModel initialized, loading model weights from {model_path}...") if is_main_process else None
             original_state_dict = load_file(model_path, device='cpu')
         remapped_state_dict = remap_ovi_state_dict_for_refactored(original_state_dict)
 
@@ -247,7 +249,7 @@ class OviFusionWrapper(torch.nn.Module):
         if unexpected_keys: 
             logger.warning(f"Ovi weights loading: Unexpected keys: {unexpected_keys}")
         
-        logger.info(f"Ovi weights loaded into refactored model.") if dist.get_rank() == 0 else None
+        logger.info(f"Ovi weights loaded into refactored model.") if is_main_process else None
         self.model.eval()
 
         self.scheduler = FlowMatchScheduler(
@@ -316,6 +318,10 @@ class OviFusionWrapper(torch.nn.Module):
         timestep_v: Optional[torch.Tensor] = None,
         timestep_a: Optional[torch.Tensor] = None,
 
+        kv_cache_list: Optional[List] = None,
+        current_start_vid: Optional[int] = None,
+        current_start_audio: Optional[int] = None,
+
         **kwargs 
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         
@@ -351,18 +357,36 @@ class OviFusionWrapper(torch.nn.Module):
         # FusionModel 接受 List[Tensor] 作为输入
         if self.is_causal:
             assert timestep_v is not None and timestep_a is not None
-            flow_pred_video_list, flow_pred_audio_list = self.model(
-                vid=video_input_list,
-                audio=audio_input_list,
-                t_vid=timestep_v,
-                t_aud=timestep_a,
-                vid_context=video_context_list,
-                audio_context=audio_context_list,
-                vid_seq_len=vid_seq_len,
-                audio_seq_len=audio_seq_len,
-                first_frame_is_clean=first_frame_is_clean,
-                slg_layer=slg_layer
-            )
+            if kv_cache_list is not None:
+                assert current_start_vid is not None and current_start_audio is not None
+                flow_pred_video_list, flow_pred_audio_list = self.model(
+                    vid=video_input_list,
+                    audio=audio_input_list,
+                    t_vid=timestep_v,
+                    t_aud=timestep_a,
+                    vid_context=video_context_list,
+                    audio_context=audio_context_list,
+                    vid_seq_len=vid_seq_len,
+                    audio_seq_len=audio_seq_len,
+                    kv_cache_list=kv_cache_list,
+                    current_start_vid=current_start_vid,
+                    current_start_audio=current_start_audio,
+                    first_frame_is_clean=first_frame_is_clean,
+                    slg_layer=slg_layer
+                )
+            else:
+                flow_pred_video_list, flow_pred_audio_list = self.model(
+                    vid=video_input_list,
+                    audio=audio_input_list,
+                    t_vid=timestep_v,
+                    t_aud=timestep_a,
+                    vid_context=video_context_list,
+                    audio_context=audio_context_list,
+                    vid_seq_len=vid_seq_len,
+                    audio_seq_len=audio_seq_len,
+                    first_frame_is_clean=first_frame_is_clean,
+                    slg_layer=slg_layer
+                )
             flow_pred_video = torch.stack(flow_pred_video_list).permute(0, 2, 1, 3, 4)
             flow_pred_audio = torch.stack(flow_pred_audio_list)
             x0_pred_video = self._convert_flow_pred_to_x0(flow_pred_video, video_latent, timestep_v)

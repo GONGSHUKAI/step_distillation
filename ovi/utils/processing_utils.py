@@ -203,7 +203,7 @@ def scale_hw_to_area_divisible(h, w, area=1024*1024, n=16):
 
     return new_h, new_w
 
-def validate_and_process_user_prompt(text_prompt: str, image_path: str = None, mode: str = "t2v") -> str:
+def validate_and_process_user_prompt(text_prompt: str, image_path: str = None, mode: str = "t2v", output_dir: str = None) -> str:
     if not isinstance(text_prompt, str):
         raise ValueError("User input must be a string")
 
@@ -259,6 +259,14 @@ def validate_and_process_user_prompt(text_prompt: str, image_path: str = None, m
         text_prompts = [text_prompt]
         image_paths = [image_path]
 
+    if output_dir and os.path.isdir(output_dir):
+        done = {p for p in os.listdir(output_dir) if p.endswith('.mp4')}
+        keep_idx = [
+            i for i, ip in enumerate(image_paths) if f"{ip.split('/')[-1].split('.')[0]}.mp4" not in done
+        ]
+        text_prompts = [text_prompts[i] for i in keep_idx]
+        image_paths = [image_paths[i] for i in keep_idx]
+        
     return text_prompts, image_paths
 
 

@@ -306,7 +306,7 @@ if __name__ == "__main__":
             self.model_name = "Ovi"
             self.generator_name = "Ovi"
             self.generator_type = "causal"
-            self.generator_path = "/cpfs01/gongshukai/weights/Ovi/Ovi/model.safetensors"
+            self.generator_path = "/cpfs01/gongshukai/step_distillation/logs/ovi_ode_init/checkpoint_model_002000/model.pt"
 
             self.model_kwargs = {
                 "timestep_shift": 5.0
@@ -334,6 +334,7 @@ if __name__ == "__main__":
     video_ode_latent = batch["video_ode_latent"].to(device, dtype)
     audio_ode_latent = batch["audio_ode_latent"].to(device, dtype)
     prompts = batch["prompts"]
+    print(prompts)
 
     print(f"video_ode_latent shape: {video_ode_latent.shape}, audio_ode_latent shape: {audio_ode_latent.shape}")
     print(f"Device: {device}, Dtype: {dtype}")

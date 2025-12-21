@@ -61,7 +61,7 @@ def main(config, args):
     text_prompt = config.get("text_prompt")
     image_path = config.get("image_path", None)
     assert config.get("mode") in ["t2v", "i2v", "t2i2v"], f"Invalid mode {config.get('mode')}, must be one of ['t2v', 'i2v', 't2i2v']"
-    text_prompts, image_paths = validate_and_process_user_prompt(text_prompt, image_path, mode=config.get("mode"))
+    text_prompts, image_paths = validate_and_process_user_prompt(text_prompt, image_path, mode=config.get("mode"), output_dir=config.get("output_dir", "./outputs"))
     if config.get("mode") != "i2v":
         logging.info(f"mode: {config.get('mode')}, setting all image_paths to None")
         image_paths = [None] * len(text_prompts)
@@ -110,7 +110,7 @@ def main(config, args):
         # Distribute across SP groups
         this_rank_eval_data = all_eval_data[sp_group_id :: num_sp_groups]
 
-    for _, (text_prompt, image_path) in tqdm(enumerate(this_rank_eval_data)):
+    for _, (text_prompt, image_path) in tqdm(enumerate(this_rank_eval_data), disable=local_rank!=0, total=len(this_rank_eval_data), desc="Generating Ovi ODE Pairs (CFG)"):
         video_frame_height_width = config.get("video_frame_height_width", None)
         seed = config.get("seed", 100)
         solver_name = config.get("solver_name", "unipc")
@@ -153,7 +153,8 @@ def main(config, args):
                     "audio_negative_prompt": audio_negative_prompt,
                 })
                 ode_data_dict["sample_hash"] = sample_hash
-                filename = hashlib.md5(sample_hash.encode()).hexdigest()
+                # filename = hashlib.md5(sample_hash.encode()).hexdigest()
+                filename = image_path.split('/')[-1].split('.')[0]
                 # output_path = os.path.join(output_dir, f"{formatted_prompt}_{'x'.join(map(str, video_frame_height_width))}_{seed+idx}_{global_rank}.mp4")
                 output_path = os.path.join(output_dir, f"{filename}.mp4")
                 save_video(output_path, generated_video, generated_audio, fps=24, sample_rate=16000)

@@ -124,35 +124,46 @@ def causal_fusion_logic(
         real_sink_tokens = sink_size * tpf_target
         kv_cache_size = fusion_cache["k"].shape[1]
         num_new_tokens = k.shape[1]
-        current_end = fusion_cache["global_end_index"].item() + num_new_tokens
+        current_end = cache_start + num_new_tokens
         
+        # Only check for eviction if we are strictly moving forward (Append mode)
         if local_attn_size != -1 and (current_end > fusion_cache["global_end_index"].item()) and \
            (num_new_tokens + fusion_cache["local_end_index"].item() > kv_cache_size):
-            num_evicted = num_new_tokens + fusion_cache["local_end_index"].item() - kv_cache_size
-            num_rolled = fusion_cache["local_end_index"].item() - num_evicted - real_sink_tokens
-            if num_rolled > 0:
-                fusion_cache["k"][:, real_sink_tokens : real_sink_tokens + num_rolled] = \
-                    fusion_cache["k"][:, real_sink_tokens + num_evicted : real_sink_tokens + num_evicted + num_rolled].clone()
-                fusion_cache["v"][:, real_sink_tokens : real_sink_tokens + num_rolled] = \
-                    fusion_cache["v"][:, real_sink_tokens + num_evicted : real_sink_tokens + num_evicted + num_rolled].clone()
-            local_write_start = fusion_cache["local_end_index"].item() - num_evicted
-            local_write_end = local_write_start + num_new_tokens
-            fusion_cache["k"][:, local_write_start : local_write_end] = k
-            fusion_cache["v"][:, local_write_start : local_write_end] = v
-            local_end_index = local_write_end
+            # Calculate the number of new tokens added in this step
+            # Shift existing cache content left to discard oldest tokens
+            num_evicted_tokens = num_new_tokens + fusion_cache["local_end_index"].item() - kv_cache_size
+            num_rolled_tokens = fusion_cache["local_end_index"].item() - num_evicted_tokens - real_sink_tokens
+            # Clone to avoid overlapping memory error
+            fusion_cache["k"][:, real_sink_tokens : real_sink_tokens + num_rolled_tokens] = \
+                fusion_cache["k"][:, real_sink_tokens + num_evicted_tokens : real_sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+            fusion_cache["v"][:, real_sink_tokens : real_sink_tokens + num_rolled_tokens] = \
+                fusion_cache["v"][:, real_sink_tokens + num_evicted_tokens : real_sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+            
+            # Insert the new keys/values at the end
+            # Overwrite (去噪): current_end == global_end_index。跳过 Eviction 判断。利用公式 local_end = local_end + (current_end - global_end) 计算出的偏移量为 0，从而实现原地覆盖。
+            # Append (新Block): current_end > global_end_index。进入 Eviction 判断。
+            local_end_index = fusion_cache["local_end_index"].item() + current_end - fusion_cache["global_end_index"].item() - num_evicted_tokens
+            local_start_index = local_end_index - num_new_tokens
+            
+            fusion_cache["k"][:, local_start_index : local_end_index] = k
+            fusion_cache["v"][:, local_start_index : local_end_index] = v
+
         else:
-            local_write_start = fusion_cache["local_end_index"].item()
-            local_write_end = local_write_start + num_new_tokens
-            fusion_cache["k"][:, local_write_start : local_write_end] = k
-            fusion_cache["v"][:, local_write_start : local_write_end] = v
-            local_end_index = local_write_end
+            # Assign new keys/values directly up to current_end
+            # Overwrite (去噪): current_end == global_end_index, 利用公式 local_end = local_end + (current_end - global_end) 计算出的偏移量为 0，从而实现原地覆盖。
+            # Append (新Block): current_end > global_end_index
+            local_end_index = fusion_cache["local_end_index"].item() + current_end - fusion_cache["global_end_index"].item()
+            local_start_index = local_end_index - num_new_tokens
+            
+            fusion_cache["k"][:, local_start_index : local_end_index] = k
+            fusion_cache["v"][:, local_start_index : local_end_index] = v
 
         fusion_cache["global_end_index"].fill_(current_end)
         fusion_cache["local_end_index"].fill_(local_end_index)
         
         att_start = max(0, local_end_index - current_max_attn_size)
-        k_view = fusion_cache["k"][:, :local_end_index]
-        v_view = fusion_cache["v"][:, :local_end_index]
+        k_view = fusion_cache["k"][:, att_start:local_end_index]
+        v_view = fusion_cache["v"][:, att_start:local_end_index]
         x = attention(q_src, k_view, v_view)
     else:
         # Training
@@ -205,7 +216,7 @@ class CausalWanSelfAttention(nn.Module):
         v = self.v(x).view(b, s, n, d)
 
         if grid_sizes.shape[-1] == 3:
-            tokens_per_frame = math.prod(grid_sizes[0][1:]).item()
+            tokens_per_frame = 880
         else:
             tokens_per_frame = 1
 
@@ -216,34 +227,43 @@ class CausalWanSelfAttention(nn.Module):
             sink_tokens = self.sink_size * tokens_per_frame
             kv_cache_size = kv_cache["k"].shape[1]
             num_new_tokens = k_rope.shape[1]
-            current_end = kv_cache["global_end_index"].item() + num_new_tokens
+            current_end = current_start + num_new_tokens
             
             if self.local_attn_size != -1 and (current_end > kv_cache["global_end_index"].item()) and \
                (num_new_tokens + kv_cache["local_end_index"].item() > kv_cache_size):
-                num_evicted = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
-                num_rolled = kv_cache["local_end_index"].item() - num_evicted - sink_tokens
-                if num_rolled > 0:
-                    kv_cache["k"][:, sink_tokens : sink_tokens + num_rolled] = kv_cache["k"][:, sink_tokens + num_evicted : sink_tokens + num_evicted + num_rolled].clone()
-                    kv_cache["v"][:, sink_tokens : sink_tokens + num_rolled] = kv_cache["v"][:, sink_tokens + num_evicted : sink_tokens + num_evicted + num_rolled].clone()
-                local_write_start = kv_cache["local_end_index"].item() - num_evicted
-                local_write_end = local_write_start + num_new_tokens
-                kv_cache["k"][:, local_write_start : local_write_end] = k_rope
-                kv_cache["v"][:, local_write_start : local_write_end] = v
-                local_end_index = local_write_end
+                
+                num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
+                num_rolled_tokens = kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens
+                
+                kv_cache["k"][:, sink_tokens : sink_tokens + num_rolled_tokens] = \
+                    kv_cache["k"][:, sink_tokens + num_evicted_tokens : sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                kv_cache["v"][:, sink_tokens : sink_tokens + num_rolled_tokens] = \
+                    kv_cache["v"][:, sink_tokens + num_evicted_tokens : sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                
+                # Insert the new keys/values at the end
+                local_end_index = kv_cache["local_end_index"].item() + current_end - \
+                    kv_cache["global_end_index"].item() - num_evicted_tokens
+                local_start_index = local_end_index - num_new_tokens
+                
+                kv_cache["k"][:, local_start_index : local_end_index] = k_rope
+                kv_cache["v"][:, local_start_index : local_end_index] = v
             else:
-                local_write_start = kv_cache["local_end_index"].item()
-                local_write_end = local_write_start + num_new_tokens
-                kv_cache["k"][:, local_write_start : local_write_end] = k_rope
-                kv_cache["v"][:, local_write_start : local_write_end] = v
-                local_end_index = local_write_end
+                # Assign new keys/values directly up to current_end
+                local_end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
+                local_start_index = local_end_index - num_new_tokens
+                
+                kv_cache["k"][:, local_start_index : local_end_index] = k_rope
+                kv_cache["v"][:, local_start_index : local_end_index] = v
 
             kv_cache["global_end_index"].fill_(current_end)
             kv_cache["local_end_index"].fill_(local_end_index)
             
             att_start = max(0, local_end_index - self.max_attention_size)
-            k_view = kv_cache["k"][:, att_start:local_end_index]
-            v_view = kv_cache["v"][:, att_start:local_end_index]
-            x = attention(q_rope, k_view, v_view)
+            x = attention(
+                q_rope, 
+                kv_cache["k"][:, att_start:local_end_index], 
+                kv_cache["v"][:, att_start:local_end_index]
+            )
         else:
             q = rope_apply(q, grid_sizes, freqs)
             k = rope_apply(k, grid_sizes, freqs)
