@@ -325,6 +325,8 @@ class Trainer: # MODIFIED: Renamed class
         # video_latent_shape = self.config.video_latent_shape     # [1, 31, 48, 44, 80]
         # audio_latent_shape = self.config.audio_latent_shape     # [1, 157, 20]
         _, _, _, H, W = first_frame.shape
+
+        # NOTE: hard coded here to be updated
         video_latent_shape = [batch_size, 31, 48, H // 16, W // 16]  # Modify height and width according to wan22_image_latent
         audio_latent_shape = [batch_size, 157, 20]                   # Audio latent shape based on audio length
 

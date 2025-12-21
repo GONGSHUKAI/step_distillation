@@ -97,12 +97,51 @@ class OviSelfForcingModel(OviBaseModel):
     def __init__(self, args, device):
         super().__init__(args, device)
         self.denoising_loss_func = get_denoising_loss(args.denoising_loss_type)()
-        # TODO: need to configure causal ovi specific configuration, including causal related (such as block sizes for video/audio)
         if self.is_causal:
-            # TODO: need to configure causal ovi specific configuration, including causal related (such as block sizes for video/audio)
-            ...
+            # NOTE: causal ovi related arguments
+            self.num_layers = self.generator.model.num_blocks
+            self.num_blocks = getattr(args, "num_blocks", None)
+            self.vid_block_size = getattr(args, "vid_block_size", None)
+            self.aud_block_size = getattr(args, "aud_block_size", None)
+            self.num_frame_per_block_video = getattr(args, "num_frame_per_block_video", None)
+            self.num_frame_per_block_audio = getattr(args, "num_frame_per_block_audio", None)
+            self.num_training_frames_video = getattr(args, "num_training_frames_video", None)
+            self.num_training_frames_audio = getattr(args, "num_training_frames_audio", None)
+            
+
 
     def _run_generator(
+        self,
+        latent_shapes: Tuple[list, list],
+        conditional_dict: dict,
+        wan22_image_latent: torch.Tensor = None,
+    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, int, int]:
+        if self.is_causal:
+            return self._run_generator_causal(
+                latent_shapes,
+                conditional_dict,
+                wan22_image_latent
+            )
+        else:
+            return self._run_generator_bidirectional(
+                latent_shapes,
+                conditional_dict,
+                wan22_image_latent
+            )
+
+    def _run_generator_causal(
+        self,
+        latent_shapes: Tuple[list, list],
+        conditional_dict: dict,
+        wan22_image_latent: torch.Tensor = None,
+    ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, int, int]:
+        video_shape, audio_shape = latent_shapes
+        # Step 1: Sample noise and backward simulate the generator's input
+        assert getattr(self.args, "backward_simulation", True), "Backward simulation needs to be enabled"
+        video_noise_shape = video_shape.copy()
+        audio_noise_shape = audio_shape.copy()
+
+    def _run_generator_bidirectional(
         self,
         latent_shapes: Tuple[list, list],
         conditional_dict: dict,
