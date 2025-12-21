@@ -198,7 +198,7 @@ class SelfForcingTrainingPipeline:
                     device=noise.device,
                     dtype=torch.int64) * current_timestep
 
-                if not exit_flag:   # 如果还没到最后一步，不带着梯度去噪
+                if not exit_flag:   # 如果还没到最后一步，不带着梯度去噪 # NOTE: ermu2001: it's not the "last step", but the step that was not selected for gradient computation in random sampling the loss configuration 
                     with torch.no_grad():
                         _, denoised_pred = self.generator(
                             noisy_image_or_video=noisy_input,
@@ -259,7 +259,7 @@ class SelfForcingTrainingPipeline:
                             crossattn_cache=self.crossattn_cache,
                             current_start=current_start_frame * self.frame_seq_length
                         )
-                    break
+                    break # NOTE: ermu2001: then this is a bit wierd since sampled exit flag not necessary is the "last step"
 
             # 3.2 记录当前 Block 最终生成的 latent
             output[:, current_start_frame:current_start_frame + current_num_frames] = denoised_pred

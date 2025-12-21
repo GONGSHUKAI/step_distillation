@@ -7,7 +7,7 @@ import torch.distributed as dist
 import torch
 
 # Assuming your Ovi wrappers and pipelines are defined elsewhere
-from pipeline import OviBidirectionalTrainingPipeline # You need to create this
+from pipeline import OviBidirectionalTrainingPipeline, OviSelfForcingTrainingPipeline # You need to create this
 from utils.loss import get_denoising_loss
 from utils.ovi_wrapper import OviFusionWrapper, OviTextEncoder, OviVAEWrapper # Use your Ovi wrappers
 
@@ -15,6 +15,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 class OviBaseModel(nn.Module):
+    generator: OviFusionWrapper
     def __init__(self, args, device):
         super().__init__()
         self.is_causal = getattr(args, "generator_type", "bidirectional") == "causal"
@@ -96,6 +97,10 @@ class OviSelfForcingModel(OviBaseModel):
     def __init__(self, args, device):
         super().__init__(args, device)
         self.denoising_loss_func = get_denoising_loss(args.denoising_loss_type)()
+        # TODO: need to configure causal ovi specific configuration, including causal related (such as block sizes for video/audio)
+        if self.is_causal:
+            # TODO: need to configure causal ovi specific configuration, including causal related (such as block sizes for video/audio)
+            ...
 
     def _run_generator(
         self,
@@ -195,7 +200,13 @@ class OviSelfForcingModel(OviBaseModel):
         MODIFIED FOR OVI: Initialize a pipeline that supports dual branches.
         """
         if self.is_causal:
-            raise NotImplementedError("Causal models are not supported for Ovi.")
+            raise OviSelfForcingTrainingPipeline(
+                model_name=self.generator_name,
+                denoising_step_list=self.denoising_step_list,
+                scheduler=self.scheduler,
+                generator=self.generator, # Pass the OviFusionWrapper
+                # TODO: need to configure causal ovi specific configuration, including causal related (such as block sizes for video/audio)
+            )
         else:
             # You must create this new pipeline class.
             self.inference_pipeline = OviBidirectionalTrainingPipeline(
