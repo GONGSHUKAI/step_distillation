@@ -98,17 +98,15 @@ class OviSelfForcingModel(OviBaseModel):
         super().__init__(args, device)
         self.denoising_loss_func = get_denoising_loss(args.denoising_loss_type)()
         if self.is_causal:
-            # NOTE: causal ovi related arguments
+            # NOTE: causal ovi related arguments, currently all filling in None since we need to understand all usage.
             self.num_layers = self.generator.model.num_blocks
             self.num_blocks = getattr(args, "num_blocks", None)
             self.vid_block_size = getattr(args, "vid_block_size", None)
             self.aud_block_size = getattr(args, "aud_block_size", None)
-            self.num_frame_per_block_video = getattr(args, "num_frame_per_block_video", None)
-            self.num_frame_per_block_audio = getattr(args, "num_frame_per_block_audio", None)
             self.num_training_frames_video = getattr(args, "num_training_frames_video", None)
             self.num_training_frames_audio = getattr(args, "num_training_frames_audio", None)
-            
-
+            self.start_gradient_frame_index_video = getattr(args, "start_gradient_frame_index_video", None)
+            self.context_noise = getattr(args, "context_noise", 0.0)
 
     def _run_generator(
         self,
@@ -140,6 +138,45 @@ class OviSelfForcingModel(OviBaseModel):
         assert getattr(self.args, "backward_simulation", True), "Backward simulation needs to be enabled"
         video_noise_shape = video_shape.copy()
         audio_noise_shape = audio_shape.copy()
+
+        # --- Create noise tensors ---
+        video_noise = torch.randn(video_noise_shape, device=self.device, dtype=self.dtype)
+        audio_noise = torch.randn(audio_noise_shape, device=self.device, dtype=self.dtype)
+
+        # --- Run Backward Simulation for BOTH branches ---
+        # The pipeline must be adapted to handle a tuple of noises and return a tuple of latents.
+        pred_latents, denoised_timestep_from, denoised_timestep_to = self._consistency_backward_simulation(
+            noises=(video_noise, audio_noise),
+            wan22_image_latent=wan22_image_latent,
+            **conditional_dict
+        )
+        pred_video, pred_audio = pred_latents
+
+        # # --- Post-processing (applies ONLY to video) ---
+        # # The logic for re-encoding the first frame for long videos is kept.
+        # if pred_video.shape[1] > latent_frames_num: # i.e., num_generated_frames > 31, which will not happen here
+        #     with torch.no_grad():
+        #         latent_to_decode = pred_video[:, :-(latent_frames_num-1), ...]
+        #         pixels = self.vae.decode_video(latent_to_decode) # Use the video part of the VAE
+        #         frame = pixels[:, -1:, ...].to(self.dtype)
+        #         frame = rearrange(frame, "b t c h w -> b c t h w")
+        #         image_latent = self.vae.video_vae.encode_to_latent(frame).to(self.dtype)
+            
+        #     pred_video_last_clip = torch.cat([image_latent, pred_video[:, -(latent_frames_num-1):, ...]], dim=1)
+        # else:
+        #     pred_video_last_clip = pred_video
+
+        # # --- Gradient Mask (applies ONLY to video) ---
+        # if num_generated_frames != min_num_frames:  # 31 != 31, which will not happen here
+        #     gradient_mask = torch.ones_like(pred_video_last_clip, dtype=torch.bool)
+        #     # Do not compute loss on the context frames (first block)
+        #     gradient_mask[:, :self.num_frame_per_block] = False
+        # else:
+        #     gradient_mask = None
+        gradient_mask = None
+        final_pred_latents = (pred_video.to(self.dtype), pred_audio.to(self.dtype))
+        
+        return final_pred_latents, gradient_mask, denoised_timestep_from, denoised_timestep_to
 
     def _run_generator_bidirectional(
         self,
@@ -244,7 +281,14 @@ class OviSelfForcingModel(OviBaseModel):
                 denoising_step_list=self.denoising_step_list,
                 scheduler=self.scheduler,
                 generator=self.generator, # Pass the OviFusionWrapper
-                # TODO: need to configure causal ovi specific configuration, including causal related (such as block sizes for video/audio)
+                # NOTE: causal ovi related arguments
+                num_blocks=self.num_blocks,
+                vid_block_size=self.vid_block_size,
+                aud_block_size=self.aud_block_size,
+                num_training_frames_video=self.num_training_frames_video,
+                num_training_frames_audio=self.num_training_frames_audio,
+                start_gradient_frame_index_video=self.start_gradient_frame_index_video,
+                context_noise=self.context_noise
             )
         else:
             # You must create this new pipeline class.
