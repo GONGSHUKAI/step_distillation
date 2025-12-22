@@ -2,7 +2,7 @@ export CUDA_VISIBLE_DEVICES=0
 
 # python ovi_fewstep_causal_batch.py \
 #     --config_path configs/inference/self_forcing_ovi.yaml \
-#     --checkpoint_path /cpfs01/gongshukai/step_distillation/logs/distill_ovi_lr_2e-6_lr_critic_4e-7_weighted_loss_smallcfg_720ckpt_15k_data/checkpoint_model_009000/model.pt \
+#     --checkpoint_path /cpfs01/gongshukai/step_distillation/logs/ovi_original.pt \
 #     --csv_path examples/ode_example.csv \
 #     --output_dir outputs/ovi_causal \
 #     --debug_visual
@@ -13,3 +13,17 @@ python ovi_fewstep_causal_batch.py \
     --csv_path examples/ode_example.csv \
     --output_dir outputs/ovi_causal \
     --debug_visual
+
+# export CUDA_VISIBLE_DEVICES=1
+
+# python ovi_fewstep_batch.py \
+#     --config_path configs/inference/ovi_smallcfg.yaml \
+#     --checkpoint_path /cpfs01/gongshukai/step_distillation/logs/ovi_original.pt \
+#     --csv examples/ode_example.csv \
+#     --output_dir outputs/ovi_causal
+
+# python inference.py \
+#     --config_path configs/self_forcing_dmd.yaml \
+#     --output_folder outputs/self_forcing_dmd \
+#     --checkpoint_path /cpfs01/gongshukai/weights/self-forcing-ode-init/ode_init.pt \
+#     --data_path prompts/MovieGenVideoBench_extended.txt  > test.log 2>&1

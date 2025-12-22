@@ -3,7 +3,7 @@ MASTER_PORT=${MLP_WORKER_0_PORT:-1235}
 NNODES=${MLP_WORKER_NUM:-1}
 NODE_RANK=${MLP_ROLE_INDEX:-0}
 NPROC_PER_NODE=${NPROC_PER_NODE:-8}
-LOGDIR="/cpfs01/gongshukai/step_distillation/logs/ovi_ode_init"
+LOGDIR="/root/weights/ovi_ode_init"
 
 torchrun \
     --nnodes $NNODES \

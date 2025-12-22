@@ -34,7 +34,7 @@ model_kwargs:
 gradient_checkpointing: true
 mixed_precision: true  # 使用 bf16
 warp_denoising_step: true
-data_path: /cpfs01/gongshukai/step_distillation/data/ode_pairs_1219
+data_path: /cpfs01/gongshukai/step_distillation/data/ode_pairs_1219   # ls /cpfs01/gongshukai/step_distillation/data/ode_pairs_1219 | wc -l
 batch_size: 4
 max_pair: 10000000
 # lr: 2.0e-06
