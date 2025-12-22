@@ -25,12 +25,12 @@ generator_path: /cpfs01/gongshukai/weights/Ovi/Ovi/model.safetensors
 distribution_loss: dmd            
 trainer: score_distillation_ovi   
 num_blocks: 8
-num_frame_per_block_video: 4
-num_frame_per_block_audio: 20
 num_training_frames_video: 32
 num_training_frames_audio: 160
 vid_block_size: 4
 aud_block_size: 20
+start_gradient_frame_index_video: 0
+context_noise: 0.0
 
 load_raw_video: false
 model_kwargs:
