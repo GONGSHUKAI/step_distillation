@@ -106,8 +106,10 @@ class OviSelfForcingModel(OviBaseModel):
             self.num_training_frames_video = getattr(args, "num_training_frames_video", None)
             self.num_training_frames_audio = getattr(args, "num_training_frames_audio", None)
             self.start_gradient_frame_index_video = getattr(args, "start_gradient_frame_index_video", None)
-            self.context_noise = getattr(args, "context_noise", 0.0)
-
+            self.context_noise = getattr(args, "context_noise", None)
+            self.last_step_only = getattr(args, "last_step_only", None)
+            self.same_step_accross_blocks = getattr(args, "same_step_accross_blocks", None)
+            
     def _run_generator(
         self,
         latent_shapes: Tuple[list, list],
@@ -276,7 +278,7 @@ class OviSelfForcingModel(OviBaseModel):
         MODIFIED FOR OVI: Initialize a pipeline that supports dual branches.
         """
         if self.is_causal:
-            raise OviSelfForcingTrainingPipeline(
+            self.inference_pipeline = OviSelfForcingTrainingPipeline(
                 model_name=self.generator_name,
                 denoising_step_list=self.denoising_step_list,
                 scheduler=self.scheduler,
@@ -288,7 +290,9 @@ class OviSelfForcingModel(OviBaseModel):
                 num_training_frames_video=self.num_training_frames_video,
                 num_training_frames_audio=self.num_training_frames_audio,
                 start_gradient_frame_index_video=self.start_gradient_frame_index_video,
-                context_noise=self.context_noise
+                context_noise=self.context_noise,
+                last_step_only=self.last_step_only,
+                same_step_accross_blocks=self.same_step_accross_blocks,
             )
         else:
             # You must create this new pipeline class.

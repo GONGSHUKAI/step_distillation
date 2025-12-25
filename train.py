@@ -5,7 +5,19 @@ import sys
 from omegaconf import OmegaConf
 import wandb
 
-from trainer import DiffusionTrainer, GANTrainer, ODETrainer, ScoreDistillationTrainer, Wan22ScoreDistillationTrainer, OviScoreDistillationTrainer, OviScoreDistillationImageVideoTrainer, OviScoreDistillationImageVideoRLTrainer, OviScoreDistillationImageVideoRewardTrainer, OviODETrainer
+from trainer import (
+    DiffusionTrainer,
+    GANTrainer,
+    ODETrainer,
+    ScoreDistillationTrainer,
+    Wan22ScoreDistillationTrainer,
+    OviScoreDistillationTrainer,
+    OviScoreDistillationImageVideoTrainer,
+    # NOTE: ermu2001: Seems no these?
+    # OviScoreDistillationImageVideoRLTrainer,
+    # OviScoreDistillationImageVideoRewardTrainer,
+    OviODETrainer
+)
 import logging, os
 logging.basicConfig(
     level=logging.INFO,
