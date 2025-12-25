@@ -9,7 +9,7 @@ sharding_strategy: full # TODO: full or hybrid_full
 wandb_host: https://api.wandb.ai
 wandb_key: afa4e78959b05201e369f448504697737237fc5c
 wandb_entity: shukai_gong
-wandb_project: Ovi-self-forcing
+wandb_project: ovi-self-forcing
 # wandb_name: wan_causal_dmd # TODO: do we need this?
 
 # Model settings
@@ -31,6 +31,9 @@ vid_block_size: 4
 aud_block_size: 20
 start_gradient_frame_index_video: 0
 context_noise: 0.0
+last_step_only: false
+same_step_accross_blocks: false
+
 
 load_raw_video: false
 model_kwargs:
@@ -69,6 +72,7 @@ video_latent_shape: [1, 31, 48, 44, 80]   # in TI2AV settings, H, W depends on r
 audio_latent_shape: [1, 157, 20]  # 5s * 16kHz / 512 = 156.25
 
 ## Dataset settings
+data_path: data/ovi_dataset_part2.csv
 num_frames: 121
 h: 704
 w: 1280

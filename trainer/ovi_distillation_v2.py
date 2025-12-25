@@ -15,6 +15,7 @@ from utils.dataset import OviCSVDataset, OviCSVImageVideoDataset, cycle, OffsetD
 from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job
 from utils.misc import set_seed, merge_dict_list
 from ovi.modules.ovi import FusionAttentionBlock
+from ovi.modules.causal_ovi import CausalFusionAttentionBlock
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ class Trainer: # MODIFIED: Renamed class
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
             wrap_strategy=config.generator_fsdp_wrap_strategy,
-            transformer_module=(FusionAttentionBlock, )
+            transformer_module=(CausalFusionAttentionBlock, )
         )
         logger.info(f"After FSDP, model architecture: {self.model.generator}") if self.is_main_process else None
         fsdp_student = sum(p.numel() for p in self.model.generator.parameters() if p.requires_grad)
