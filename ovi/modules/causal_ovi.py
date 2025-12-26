@@ -753,7 +753,7 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
         assert seq_lens.max() <= seq_len
         x = torch.cat(x)
         cur_seq_len = x.shape[1] 
-        
+
         if t.dim() == 1:
             if first_frame_is_clean:
                 t = torch.ones((t.size(0), cur_seq_len), device=t.device, dtype=t.dtype) * t.unsqueeze(1)
@@ -769,7 +769,7 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
             if first_frame_is_clean and is_video:
                 t[:, :tokens_per_frame] = 0 
         
-        # print(f"In causal Ovi, t shape: {t.shape}, is_video: {is_video}, first_frame_is_clean:{first_frame_is_clean}, t: {t}")
+        print(f"In causal Ovi, {t.shape=}, {is_video=}, {first_frame_is_clean=}, {t=}")
         with amp.autocast('cuda', dtype=torch.bfloat16):
             bt = t.size(0)
             t_flat = t.flatten()
@@ -875,16 +875,26 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
             if slg_layer > 0 and i == slg_layer: continue
             
             caches = kv_cache_list[i]
-            vid_h, audio_h = gradient_checkpointing(
-                block, 
-                vid_h, 
-                audio_h, 
-                enabled=self.gradient_checkpointing,
+            kwargs = dict(
                 vid_self_cache=caches['vid_self'], audio_self_cache=caches['aud_self'],
                 vid_fusion_cache=caches['vid_fusion'], audio_fusion_cache=caches['aud_fusion'],
                 vid_text_cache=caches['vid_text'], audio_text_cache=caches['aud_text'],
-                **all_kwargs
             )
+            if torch.is_grad_enabled():
+                vid_h, audio_h = gradient_checkpointing(
+                    block, 
+                    vid_h, 
+                    audio_h, 
+                    enabled=self.gradient_checkpointing,
+                    **kwargs,
+                    **all_kwargs
+                )
+            else:
+                kwargs.update(dict(
+                    vid_text_cache=caches['vid_text'], audio_text_cache=caches['aud_text'],
+                ))
+                vid_h, audio_h = block(vid_h, audio_h, **kwargs, **all_kwargs)
+
             
         vid_out = self.post_transformer_block_out(vid_h, vid_kwargs['grid_sizes'], vid_e_base, True)
         audio_out = self.post_transformer_block_out(audio_h, audio_kwargs['grid_sizes'], audio_e_base, False)

@@ -309,7 +309,7 @@ class OviSelfForcingTrainingPipeline(torch.nn.Module):
 
         # 5. Denoised output: crop back to 31 video frames and 157 audio frames to match original latent size of Ovi
         final_v_lat = out_video_latents[:, :31]
-        final_a_lat = out_audio_latents[:, :157].transpose(1, 2) # [B, D, L] for MMAudio VAE
+        final_a_lat = out_audio_latents[:, :157] # NOTE: for self forcing, need to return same shape as input noise (at least order of dimensions should be the same)
         denoised_preds = (final_v_lat, final_a_lat)
 
         # TODO: figure out what these two are for, need to checkout self_forcing_training.py, for corresponding steps
