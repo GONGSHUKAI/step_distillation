@@ -83,12 +83,17 @@ class Trainer: # MODIFIED: Renamed class
         logger.info(f"Before FSDP, model architecture: {self.model.generator}") if self.is_main_process else None
         orig_student = sum(p.numel() for p in self.model.generator.parameters() if p.requires_grad)
         logger.info(f"Before FSDP, student parameters: {orig_student/1e9:.2f}B") if self.is_main_process else None
+        transformer_module = (
+            (CausalFusionAttentionBlock, )
+            if config.generator_type == "causal"
+            else (FusionAttentionBlock, )
+        )
         self.model.generator = fsdp_wrap(
             self.model.generator,
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
             wrap_strategy=config.generator_fsdp_wrap_strategy,
-            transformer_module=(CausalFusionAttentionBlock, )
+            transformer_module=transformer_module
         )
         logger.info(f"After FSDP, model architecture: {self.model.generator}") if self.is_main_process else None
         fsdp_student = sum(p.numel() for p in self.model.generator.parameters() if p.requires_grad)
@@ -323,18 +328,13 @@ class Trainer: # MODIFIED: Renamed class
         
         # Define latent shapes from config
         batch_size = len(text_prompts)
-        # video_latent_shape = self.config.video_latent_shape     # [1, 31, 48, 44, 80]
-        # audio_latent_shape = self.config.audio_latent_shape     # [1, 157, 20]
-        _, _, _, H, W = first_frame.shape
-
-        # # NOTE: this is for bidrectional
-        # video_latent_shape = [batch_size, 31, 48, H // 16, W // 16]  # Modify height and width according to wan22_image_latent
-        # audio_latent_shape = [batch_size, 157, 20]    
-        # NOTE: hard coded here to be updated, this is for causal
-        video_latent_shape = [batch_size, 32, 48, H // 16, W // 16]  # Modify height and width according to wan22_image_latent
-        audio_latent_shape = [batch_size, 160, 20]                   # Audio latent shape based on audio length
-
-        latent_shapes = (video_latent_shape, audio_latent_shape)
+        video_latent_shape = self.config.video_latent_shape     # [31, 48, 44, 80] or [32, 48, 44, 80]
+        audio_latent_shape = self.config.audio_latent_shape     # [157, 20] or [160, 20]
+        # _, _, _, H, W = first_frame.shape # NOTE: currently using hard coded latent shapes from config
+        latent_shapes = (
+            [batch_size, *video_latent_shape], 
+            [batch_size, *audio_latent_shape]
+        )
 
         # Step 3: Call generator or critic loss
         if train_generator:

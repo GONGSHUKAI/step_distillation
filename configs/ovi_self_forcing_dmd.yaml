@@ -19,7 +19,7 @@ generator_name: Ovi             # student model, trainable
 generator_type: causal   # bidirectional diffusion, not causal diffusion
 real_path: /cpfs01/gongshukai/weights/Ovi/Ovi/model.safetensors
 fake_path: /cpfs01/gongshukai/weights/Ovi/Ovi/model.safetensors
-generator_path: /cpfs01/gongshukai/weights/Ovi/Ovi/model.safetensors
+generator_ckpt: /cpfs01/gongshukai/step_distillation/logs/ovi_ode_init/checkpoint_model_008000/model.pt
 
 ## Ovi Self Forcing Distillation settings
 distribution_loss: dmd            
@@ -33,7 +33,13 @@ start_gradient_frame_index_video: 0
 context_noise: 0.0
 last_step_only: false
 same_step_accross_blocks: false
+# NOTE: for causal
+video_latent_shape: [32, 48, 44, 80]
+audio_latent_shape: [160, 20]
 
+# # NOTE: for bidirectional
+# video_latent_shape: [31, 48, 44, 80]
+# audio_latent_shape: [157, 20]
 
 load_raw_video: false
 model_kwargs:
@@ -67,9 +73,7 @@ batch_size: 2 # changing to batch size 1, since the thing is quite large
 ema_weight: 0.99
 ema_start_step: 200
 total_batch_size: 64
-log_iters: 1000
-video_latent_shape: [1, 31, 48, 44, 80]   # in TI2AV settings, H, W depends on ref image size
-audio_latent_shape: [1, 157, 20]  # 5s * 16kHz / 512 = 156.25
+log_iters: 500
 
 ## Dataset settings
 data_path: data/ovi_dataset_part2.csv

@@ -79,7 +79,7 @@ def launch_distributed_job(backend: str = "nccl"):
     world_size = int(os.environ["WORLD_SIZE"])
     host = os.environ["MASTER_ADDR"]
     port = int(os.environ["MASTER_PORT"])
-
+    # NOTE: ermu2001: what does this mean?
     if ":" in host:  # IPv6
         init_method = f"tcp://[{host}]:{port}"
     else:  # IPv4
