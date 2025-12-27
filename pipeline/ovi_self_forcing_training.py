@@ -1,6 +1,6 @@
 from typing import List, Tuple
 import torch
-
+import torch.distributed as dist
 from utils.ovi_wrapper import OviFusionWrapper
 from utils.scheduler import SchedulerInterface
 import torch.distributed as dist
@@ -49,6 +49,7 @@ class OviSelfForcingTrainingPipeline(torch.nn.Module):
 
 
         self.kv_cache_list = None
+        self.is_main_process = not dist.is_initialized() or dist.get_rank() == 0
 
         # TODO: hard coding for now, need to make it configurable later
         self.tokens_per_vid_frame = 880     # 44*80/2/2
@@ -88,7 +89,7 @@ class OviSelfForcingTrainingPipeline(torch.nn.Module):
                 cache_list.append(layer_cache)
             
             self.kv_cache_list = cache_list
-            logger.info(f"KV Cache initialized.")
+            logger.debug(f"KV Cache initialized.") if self.is_main_process else None
         else:
             for layer_cache in self.kv_cache_list:
                 # reset selfattn cache
@@ -100,7 +101,7 @@ class OviSelfForcingTrainingPipeline(torch.nn.Module):
                 layer_cache['vid_text']['is_init'] = False
                 layer_cache['aud_text']['is_init'] = False
             
-            logger.info(f"KV Cache Indices Reset.")
+            logger.debug(f"KV Cache Indices Reset.") if self.is_main_process else None
 
 
     def generate_and_sync_list(self, num_blocks, num_denoising_steps, device):
@@ -256,6 +257,10 @@ class OviSelfForcingTrainingPipeline(torch.nn.Module):
                         #     crossattn_cache=self.crossattn_cache,
                         #     current_start=current_start_frame * self.frame_seq_length
                         # )
+                        # # NOTE: ermu2001: debugging
+                        # if torch.distributed.get_rank() == 0:
+                        #     print(f"{t_val=}")
+                        # print(f"exit flag reached, {t_v=}, denoising with {torch.is_grad_enabled()=}") if torch.distributed.get_rank()==0 else None
                         x0_v, x0_a, _, _ = self.generator(
                             video_latent=curr_latent_v,
                             audio_latent=curr_latent_a,
@@ -283,11 +288,10 @@ class OviSelfForcingTrainingPipeline(torch.nn.Module):
             with torch.no_grad():
                 t_context_v = torch.ones((B, self.vid_block_size), device=x0_v.device) * self.context_noise
                 t_context_a = torch.ones((B, self.aud_block_size), device=x0_a.device) * self.context_noise
-
                 if is_first_block:
                     x0_v = (1. - mask2) * wan22_image_latent + mask2 * x0_v
                     x0_v = x0_v.to(dtype)
-
+                # print(f"Updating KV Cache with t=0, {torch.is_grad_enabled()=}") if torch.distributed.get_rank()==0 else None
                 self.generator(
                     video_latent=x0_v,
                     audio_latent=x0_a,
@@ -297,7 +301,6 @@ class OviSelfForcingTrainingPipeline(torch.nn.Module):
                     kv_cache_list=self.kv_cache_list,
                     current_start_vid=current_start_vid,
                     current_start_audio=current_start_audio,
-
                     wan22_image_latent=wan22_image_latent if is_first_block else None,
                     mask2=mask2 if is_first_block else None,
                     first_frame_is_clean=is_first_block
