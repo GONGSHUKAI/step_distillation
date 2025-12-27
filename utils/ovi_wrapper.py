@@ -17,7 +17,7 @@ from ovi.modules.mmaudio.features_utils import FeaturesUtils
 from ovi.modules.tokenizers import HuggingfaceTokenizer
 
 from utils.scheduler import SchedulerInterface, FlowMatchScheduler
-from utils.sde_util import sde_step_with_logprob
+# from utils.sde_util import sde_step_with_logprob
 from utils.dataset import masks_like
 from safetensors.torch import load_file
 import math
@@ -29,7 +29,7 @@ class OviTextEncoder(torch.nn.Module):
     def __init__(self, model_name: str = "Wan2.2-TI2V-5B") -> None:
         super().__init__()
         self.model_name = model_name
-        self.is_main_process = dist.get_rank() == 0 or not dist.is_initialized()
+        self.is_main_process = not dist.is_initialized() or dist.get_rank() == 0
         logger.info("Initializing Ovi Text Encoder...") if self.is_main_process else None
         self.text_encoder = umt5_xxl(
             encoder_only=True,
@@ -88,7 +88,7 @@ class OviVAEWrapper(torch.nn.Module):
         audio_bigvgan_ckpt: str = "/cpfs01/gongshukai/weights/Ovi/MMAudio/ext_weights/best_netG.pt",
     ):
         super().__init__()
-        self.is_main_process = dist.get_rank() == 0 or not dist.is_initialized()
+        self.is_main_process = not dist.is_initialized() or dist.get_rank() == 0
         # ===== 视频VAE (Wan2.2) =====
         # 初始化时在CPU上 (与Wan2_2_VAEWrapper一致)
         self.mean = torch.tensor([
@@ -216,7 +216,7 @@ class OviFusionWrapper(torch.nn.Module):
         super().__init__()
         self.model_name = model_name
         self.is_causal = is_causal
-        self.is_main_process = dist.get_rank() == 0 or not dist.is_initialized()
+        self.is_main_process = not dist.is_initialized() or dist.get_rank() == 0
 
         with open(video_config_path) as f:
             self.video_config = json.load(f)

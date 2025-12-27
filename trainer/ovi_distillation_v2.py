@@ -15,6 +15,7 @@ from utils.dataset import OviCSVDataset, OviCSVImageVideoDataset, cycle, OffsetD
 from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job
 from utils.misc import set_seed, merge_dict_list
 from ovi.modules.ovi import FusionAttentionBlock
+from ovi.modules.causal_ovi import CausalFusionAttentionBlock
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ class Trainer: # MODIFIED: Renamed class
             sharding_strategy=config.sharding_strategy,
             mixed_precision=config.mixed_precision,
             wrap_strategy=config.generator_fsdp_wrap_strategy,
-            transformer_module=(FusionAttentionBlock, )
+            transformer_module=(CausalFusionAttentionBlock, )
         )
         logger.info(f"After FSDP, model architecture: {self.model.generator}") if self.is_main_process else None
         fsdp_student = sum(p.numel() for p in self.model.generator.parameters() if p.requires_grad)
@@ -325,8 +326,13 @@ class Trainer: # MODIFIED: Renamed class
         # video_latent_shape = self.config.video_latent_shape     # [1, 31, 48, 44, 80]
         # audio_latent_shape = self.config.audio_latent_shape     # [1, 157, 20]
         _, _, _, H, W = first_frame.shape
-        video_latent_shape = [batch_size, 31, 48, H // 16, W // 16]  # Modify height and width according to wan22_image_latent
-        audio_latent_shape = [batch_size, 157, 20]                   # Audio latent shape based on audio length
+
+        # # NOTE: this is for bidrectional
+        # video_latent_shape = [batch_size, 31, 48, H // 16, W // 16]  # Modify height and width according to wan22_image_latent
+        # audio_latent_shape = [batch_size, 157, 20]    
+        # NOTE: hard coded here to be updated, this is for causal
+        video_latent_shape = [batch_size, 32, 48, H // 16, W // 16]  # Modify height and width according to wan22_image_latent
+        audio_latent_shape = [batch_size, 160, 20]                   # Audio latent shape based on audio length
 
         latent_shapes = (video_latent_shape, audio_latent_shape)
 
