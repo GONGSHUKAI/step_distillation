@@ -175,6 +175,7 @@ class OviSelfForcingModel(OviBaseModel):
         #     gradient_mask[:, :self.num_frame_per_block] = False
         # else:
         #     gradient_mask = None
+        # TODO: decide whether to keep this gradient mask logic for causal Ovi on first block?
         gradient_mask = None
         final_pred_latents = (pred_video.to(self.dtype), pred_audio.to(self.dtype))
         
