@@ -14,4 +14,5 @@ torchrun \
     --config_path configs/ovi_self_forcing_dmd.yaml \
     --logdir $LOGDIR \
     --no_visualize \
-    --disable-wandb
+    --disable-wandb 
+    # 2>&1 > debug.log
