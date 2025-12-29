@@ -1,9 +1,13 @@
+import tempfile
+import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from typing import Optional, Tuple, Union
 
 from model.ovi_base import OviSelfForcingModel
 from utils.dataset import masks_like
+from ovi.utils.io_utils import save_video
 import logging
 logger = logging.getLogger(__name__)
 
@@ -233,7 +237,8 @@ class OviDMD(OviSelfForcingModel):
         latent_shapes: Tuple[list, list],
         conditional_dict: dict,
         unconditional_dict: dict,
-        wan22_image_latent: Optional[torch.Tensor] = None
+        wan22_image_latent: Optional[torch.Tensor] = None,
+        log_video: Optional[bool] = False,
     ) -> Tuple[torch.Tensor, dict]:
         """
         Run the dual-branch generator and compute the combined DMD loss.
@@ -257,6 +262,27 @@ class OviDMD(OviSelfForcingModel):
             denoised_timestep_to=denoised_timestep_to,     # 250 for exit step 2
             wan22_image_latent=wan22_image_latent,         # clean first frame latent
         )
+
+        if log_video and dist.get_rank() == 0:
+            logger.info("Logging video and audio latents from generator rollout...")
+            with torch.no_grad():
+                video_latent, audio_latent = pred_latents
+                device, dtype = 'cuda', torch.bfloat16 # NOTE: hard coded since the vae is bfloat16
+                video_latent = video_latent[:1].to(device, dtype)
+                audio_latent = audio_latent[:1].transpose(1, 2).to(device, dtype)
+                video = self.vae.decode_video(video_latent) # [B, C, F, H, W]
+                audio = self.vae.decode_audio(audio_latent) # [B, L]
+                video = ((video + 1) / 2 * 255).clip(0, 255)
+                video_np = video.squeeze(0).permute(1, 0, 2, 3).cpu().float().numpy().astype(np.uint8)
+                audio_np = audio.squeeze(0).cpu().float().numpy().flatten()
+                # create a temp file and save to it
+                with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+                    save_video(
+                        output_path=f.name,
+                        video_numpy=video_np,
+                        audio_numpy=audio_np
+                    )
+                dmd_log_dict['generated_video_audio'] = f.name
 
         del pred_latents, gradient_mask, denoised_timestep_from, denoised_timestep_to
         return dmd_loss, dmd_log_dict

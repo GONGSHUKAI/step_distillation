@@ -426,7 +426,10 @@ class Trainer: # MODIFIED: Renamed class
         start_step = self.step
         while True:
             TRAIN_GENERATOR = self.step % self.config.dfake_gen_update_ratio == 0
-
+            LOG_VIDEO = (
+                TRAIN_GENERATOR
+                and (self.step % self.config.video_log_iters == 0)
+            )
             # Train Generator
             if TRAIN_GENERATOR:
                 self.generator_optimizer.zero_grad(set_to_none=True)
@@ -434,7 +437,7 @@ class Trainer: # MODIFIED: Renamed class
                 generator_log_dict = self.fwdbwd_one_step(
                     batch,
                     train_generator=True,
-                    log_video=self.step % (300 * 1) # logging generated video every n log_iter (currently is 1)
+                    log_video=LOG_VIDEO # logging generated video every n log_iter (currently is 1)
                 )
                 if not self.config.debug:
                     self.generator_optimizer.step()
@@ -476,6 +479,10 @@ class Trainer: # MODIFIED: Renamed class
                         "GradNorm/DMD_Video": generator_log_dict["dmdtrain_gradient_norm_video"].mean().item(),
                         "GradNorm/DMD_Audio": generator_log_dict["dmdtrain_gradient_norm_audio"].mean().item(),
                     })
+                    if LOG_VIDEO:
+                        wandb_log.update({
+                            "Visualization/Generated_Video_Audio": wandb.Video(generator_log_dict['generated_video_audio'], format="mp4"),
+                        })
                     logger.info(f"Step {self.step}: Generator Loss: {generator_log_dict['generator_loss'].mean().item():.4f}, Video DMD Loss: {generator_log_dict['dmd_loss_video'].mean().item():.4f}, Audio DMD Loss: {generator_log_dict['dmd_loss_audio'].mean().item():.4f}, GradNorm: {generator_log_dict['generator_grad_norm'].mean().item():.4f}, DMD Video GradNorm: {generator_log_dict['dmdtrain_gradient_norm_video'].mean().item():.4f}, DMD Audio GradNorm: {generator_log_dict['dmdtrain_gradient_norm_audio'].mean().item():.4f}")
                 
                 wandb_log.update({
