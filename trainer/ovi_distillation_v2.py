@@ -4,6 +4,7 @@ import gc
 import logging
 import torch
 import torch.distributed as dist
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 import wandb
 import time
 import os
@@ -12,12 +13,19 @@ from omegaconf import OmegaConf
 # --- OVI IMPORTS ---
 from model.ovi_dmd import OviDMD # MODIFIED: Import OviDMD
 from utils.dataset import OviCSVDataset, OviCSVImageVideoDataset, cycle, OffsetDistributedSampler # MODIFIED: You need a new dataset class
-from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job
+from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job, fsdp_optim_state_dict
 from utils.misc import set_seed, merge_dict_list
 from ovi.modules.ovi import FusionAttentionBlock
 from ovi.modules.causal_ovi import CausalFusionAttentionBlock
 
 logger = logging.getLogger(__name__)
+
+# Some helper functions
+def extract_step(folder_name):
+    import re
+    match = re.search(r"checkpoint_model_(\d+)", folder_name)
+    return int(match.group(1)) if match else -1
+
 
 class Trainer: # MODIFIED: Renamed class
     def __init__(self, config):
@@ -59,22 +67,33 @@ class Trainer: # MODIFIED: Renamed class
             raise ValueError("Ovi trainer currently only supports 'dmd' loss")
         logger.info(f"Finished initializing the distillation model.") if self.is_main_process else None
 
+        # --- Step 5 (If resuming) Load the model and optimizer, lr_scheduler, ema's statedicts
+        if getattr(config, "generator_ckpt", False):
+            logger.info(f"Loading pretrained generator from {config.generator_ckpt}") if dist.get_rank() == 0 else None
+            generator_state_dict = torch.load(config.generator_ckpt, map_location="cpu")
+            if "generator" in generator_state_dict:
+                generator_state_dict = generator_state_dict["generator"]
+            elif "model" in generator_state_dict:
+                generator_state_dict = generator_state_dict["model"]
+            self.model.generator.load_state_dict(
+                generator_state_dict, strict=True
+            )
+            del generator_state_dict
+            gc.collect()
+            torch.cuda.empty_cache()
+
         # ... (Resuming, FSDP wrapping, optimizer setup is mostly the same)
         # Note: The wrappers inside OviDMD's __init__ are already Ovi-specific
         pretrained_ckpt_path, self.step = self.load(self.output_path)
         if pretrained_ckpt_path is not None:
             logger.info(f"Loading checkpoint from {pretrained_ckpt_path} at step {self.step}") if self.is_main_process else None
             state_dict = torch.load(pretrained_ckpt_path, map_location="cpu")
+            logger.info(f"Loaded: {state_dict.keys()=} on {dist.get_rank()}")
             self.model.generator.load_state_dict(state_dict["generator"], strict=True)
             self.model.fake_score.load_state_dict(state_dict["critic"], strict=True)
-            state_dict_ema = state_dict["generator_ema"] if "generator_ema" in state_dict else None
-            # Free memory
-            del state_dict  
-            gc.collect()
-            torch.cuda.empty_cache()
         else:
             logger.info("No checkpoint found, training from scratch.") if self.is_main_process else None
-            state_dict_ema = None
+            state_dict = None
 
         # self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
 
@@ -157,6 +176,26 @@ class Trainer: # MODIFIED: Renamed class
         )
         logger.info("Finished setting up optimizers.") if self.is_main_process else None
 
+        # load optimizer states if resuming
+        if pretrained_ckpt_path is not None:
+            if state_dict.get("generator_optimizer", None) is not None:
+                logger.info("Loading generator optimizer state from checkpoint") if self.is_main_process else None
+                self.generator_optimizer.load_state_dict(
+                    FSDP.optim_state_dict_to_load(
+                        self.model.generator,
+                        self.generator_optimizer,
+                        state_dict["generator_optimizer"]
+                    )
+                )
+            if state_dict.get("critic_optimizer", None) is not None:
+                logger.info("Loading critic optimizer state from checkpoint") if self.is_main_process else None
+                self.critic_optimizer.load_state_dict(
+                    FSDP.optim_state_dict_to_load(
+                        self.model.fake_score,
+                        self.critic_optimizer,
+                        state_dict["critic_optimizer"]
+                    )
+                )
         # --- Step 3: Initialize the OVI dataloader ---
         # MODIFIED: Use a dataset that returns both video and audio
         logger.info(f"Setting up dataset and dataloader...") if self.is_main_process else None
@@ -176,7 +215,7 @@ class Trainer: # MODIFIED: Renamed class
                                                  prefetch_factor=2, 
                                                  pin_memory=True,
                                                  persistent_workers=True,
-                                                 )
+                                                 drop_last=True)
         self.dataloader = cycle(dataloader)
         logger.info(f"Finished setting up dataset and dataloader, dataset class name: {dataset.__class__.__name__}, size: {len(dataset)}, batch size: {config.batch_size}") if self.is_main_process else None
         
@@ -204,31 +243,18 @@ class Trainer: # MODIFIED: Renamed class
             
             # Load EMA state dict if available in checkpoint
             if pretrained_ckpt_path is not None:
-                if state_dict_ema is not None:
+                if state_dict.get("generator_ema", None) is not None:
                     logger.info("Loading generator_ema from checkpoint") if self.is_main_process else None
-                    self.generator_ema.load_state_dict(state_dict_ema)
-                    del state_dict_ema  # Free memory
-                    gc.collect()
-                    torch.cuda.empty_cache()
+                    self.generator_ema.load_state_dict(state_dict["generator_ema"])
                 else:
                     logger.info("No generator_ema found in checkpoint, starting fresh EMA")
         logger.info("Finished setting up EMA parameters.") if self.is_main_process else None
-        
-        # --- Step 5 (If resuming) Load the model and optimizer, lr_scheduler, ema's statedicts
-        if getattr(config, "generator_ckpt", False):
-            logger.info(f"Loading pretrained generator from {config.generator_ckpt}") if dist.get_rank() == 0 else None
-            state_dict = torch.load(config.generator_ckpt, map_location="cpu")
-            if "generator" in state_dict:
-                state_dict = state_dict["generator"]
-            elif "model" in state_dict:
-                state_dict = state_dict["model"]
-            self.model.generator.load_state_dict(
-                state_dict, strict=True
-            )
-        
         self.max_grad_norm_generator = getattr(config, "max_grad_norm_generator", 10.0)
         self.max_grad_norm_critic = getattr(config, "max_grad_norm_critic", 10.0)
         self.previous_time = None
+        del state_dict
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def debug_distributed_training(self):
         rank = dist.get_rank()
@@ -253,47 +279,71 @@ class Trainer: # MODIFIED: Renamed class
         ckpt_folders = [f for f in os.listdir(out_path) if f.startswith("checkpoint_model_")]
         if not ckpt_folders: 
             return None, 0
-        
-        def extract_step(folder_name):
-            import re
-            match = re.search(r"checkpoint_model_(\d+)", folder_name)
-            return int(match.group(1)) if match else -1
         latest_ckpt_folder = sorted(ckpt_folders, key=extract_step)[-1]
         
-        # 2. read model.pt and step
-        model_path = os.path.join(out_path, latest_ckpt_folder, "model.pt")
+        # 2. Read model.pt and step
+        model_path = os.path.join(out_path, latest_ckpt_folder, "checkpoint.pt")
         step = extract_step(latest_ckpt_folder)
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"{model_path} not found")
         return model_path, step
-
+    
     def save(self):
-        logger.info("Start gathering distributed model states...")
-        generator_state_dict = fsdp_state_dict(
-            self.model.generator)
-        critic_state_dict = fsdp_state_dict(
-            self.model.fake_score)
+        os.makedirs(self.output_path, exist_ok=True)
+        checkpoint_folders = os.listdir(self.output_path)
+        checkpoint_infos = [
+            (checkpoint_folder, extract_step(checkpoint_folder))
+            for checkpoint_folder in checkpoint_folders if checkpoint_folder.startswith("checkpoint_model_")
+        ]
+        # Sort by step number
+        checkpoint_infos = sorted(checkpoint_infos, key=lambda x: x[1], reverse=True)
 
+        # filter out to keep checkpoint steps
+        checkpoint_infos = [info for info in checkpoint_infos if info[1] not in self.config.get("checkpoints_to_keep", [])]
+
+        # NOTE: maybe ensure safer deletion since we are all using root
+        # if (
+        #     (len(checkpoint_infos) >= self.config.get("num_keep_checkpoints", float("inf"))) # since we are also going to save one, we remove one when reaching the number
+        #     and (dist.get_rank() == 0)
+        # ): # a very large number, lol
+        #     # remove the oldest info
+        #     os.removedirs(os.path.join(self.output_path, checkpoint_infos[-1][0]))
+
+        generator_state_dict = fsdp_state_dict(self.model.generator)
+        critic_state_dict = fsdp_state_dict(self.model.fake_score)
+        state_dict = {}
+        # Prepare model state dictionary
+        state_dict.update({
+            "generator": generator_state_dict,
+            "critic": critic_state_dict,
+        })
+        optimizer_state_dict = {
+            "generator_optimizer": fsdp_optim_state_dict(
+                self.model.generator, 
+                self.generator_optimizer
+            ),
+            "critic_optimizer": fsdp_optim_state_dict(
+                self.model.fake_score, 
+                self.critic_optimizer
+            ),
+            "step": self.step,
+        }
+        state_dict.update(optimizer_state_dict)
         if (self.ema_weight > 0.0) and (self.ema_start_step < self.step):
-            state_dict = {
-                "generator": generator_state_dict,
-                "critic": critic_state_dict,
+            state_dict.update({
                 "generator_ema": self.generator_ema.state_dict(),
-            }
-        else:
-            state_dict = {
-                "generator": generator_state_dict,
-                "critic": critic_state_dict,
-            }
-
-        if self.is_main_process:
-            os.makedirs(os.path.join(self.output_path,
-                        f"checkpoint_model_{self.step:06d}"), exist_ok=True)
-            torch.save(state_dict, os.path.join(self.output_path,
-                       f"checkpoint_model_{self.step:06d}", "model.pt"))
-            logger.info(f"Model saved to {os.path.join(self.output_path, f'checkpoint_model_{self.step:06d}', 'model.pt')}")
-
-    def fwdbwd_one_step(self, batch, train_generator):
+            })
+        if dist.get_rank() == 0:
+            # Create checkpoint directory
+            checkpoint_dir = os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}")
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            logger.info("Finished gathering distributed model states.")
+            # Save model states
+            model_path = os.path.join(checkpoint_dir, "checkpoint.pt")
+            torch.save(state_dict, model_path)
+            logger.info(f"Model saved to {model_path}")
+        
+    def fwdbwd_one_step(self, batch, train_generator, log_video=False):
         # --- HEAVILY MODIFIED FOR OVI ---
         self.model.eval()
 
@@ -343,12 +393,15 @@ class Trainer: # MODIFIED: Renamed class
                 conditional_dict=conditional_dict,
                 unconditional_dict=unconditional_dict,
                 wan22_image_latent=wan22_image_latent,
+                log_video=log_video,
             )
             torch.cuda.empty_cache()
             generator_loss.backward()
             generator_grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm_generator)
-            generator_log_dict.update({"generator_loss": generator_loss, 
-                                       "generator_grad_norm": generator_grad_norm})
+            generator_log_dict.update({
+                "generator_loss": generator_loss,
+                "generator_grad_norm": generator_grad_norm}
+            )
             return generator_log_dict
         else:
             generator_log_dict = {}
@@ -362,8 +415,10 @@ class Trainer: # MODIFIED: Renamed class
         )
         critic_loss.backward()
         critic_grad_norm = self.model.fake_score.clip_grad_norm_(self.max_grad_norm_critic)
-        critic_log_dict.update({"critic_loss": critic_loss, 
-                                "critic_grad_norm": critic_grad_norm})
+        critic_log_dict.update({
+            "critic_loss": critic_loss,
+            "critic_grad_norm": critic_grad_norm}
+        )
         return critic_log_dict
 
     def train(self):
@@ -376,7 +431,11 @@ class Trainer: # MODIFIED: Renamed class
             if TRAIN_GENERATOR:
                 self.generator_optimizer.zero_grad(set_to_none=True)
                 batch = next(self.dataloader)
-                generator_log_dict = self.fwdbwd_one_step(batch, train_generator=True)
+                generator_log_dict = self.fwdbwd_one_step(
+                    batch,
+                    train_generator=True,
+                    log_video=self.step % (300 * 1) # logging generated video every n log_iter (currently is 1)
+                )
                 if not self.config.debug:
                     self.generator_optimizer.step()
                     if self.generator_ema is not None: 
@@ -396,7 +455,11 @@ class Trainer: # MODIFIED: Renamed class
                 self.generator_ema = EMA_FSDP(self.model.generator, decay=self.ema_weight)
 
             # Save model
-            if (not self.config.no_save) and (self.step - start_step) > 0 and (self.step % self.config.log_iters == 0):
+            if (
+                (not self.config.no_save)
+                and (self.step - start_step) > 0
+                and (self.step % self.config.log_iters == 0)
+            ):
                 torch.cuda.empty_cache()
                 self.save()
                 torch.cuda.empty_cache()

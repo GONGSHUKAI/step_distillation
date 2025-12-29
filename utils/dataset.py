@@ -28,7 +28,7 @@ class OffsetDistributedSampler(DistributedSampler):
         else:
             self.initial_step = (
                 (initial_step * gpu_num - len(dataset)) % len(dataset)
-            ) // (gpu_num * gpu_num)
+            ) // (gpu_num * gpu_num) # NOTE: Why does this divide by gpu_num * gpu_num?
         self.first_time = True  # 标志位，表示是否是第一次加载
 
     def __iter__(self):
