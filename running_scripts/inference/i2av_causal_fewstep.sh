@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=2
 
 # python ovi_fewstep_causal_batch.py \
 #     --config_path configs/inference/self_forcing_ovi.yaml \
@@ -9,8 +9,8 @@ export CUDA_VISIBLE_DEVICES=0
 
 python ovi_fewstep_causal_batch.py \
     --config_path configs/inference/self_forcing_ovi.yaml \
-    --checkpoint_path logs/ovi_ode_init/checkpoint_model_002000/model.pt \
-    --csv_path examples/ode_example.csv \
+    --checkpoint_path /cpfs01/gongshukai/step_distillation/logs/outputs/ovi_self_forcing_dmd_20251229/checkpoint_model_002000/checkpoint.pt \
+    --csv_path examples/ti2av_gsk.csv \
     --output_dir outputs/ovi_causal \
     --debug_visual
 

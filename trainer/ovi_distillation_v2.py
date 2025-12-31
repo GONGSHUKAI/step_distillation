@@ -249,6 +249,26 @@ class Trainer: # MODIFIED: Renamed class
                 else:
                     logger.info("No generator_ema found in checkpoint, starting fresh EMA")
         logger.info("Finished setting up EMA parameters.") if self.is_main_process else None
+        
+        # --- Step 5 (If resuming) Load the model and optimizer, lr_scheduler, ema's statedicts
+        if getattr(config, "generator_ckpt", False):
+            logger.info(f"Loading pretrained generator from {config.generator_ckpt}") if dist.get_rank() == 0 else None
+            state_dict = torch.load(config.generator_ckpt, map_location="cpu")
+            if "generator_ema" in state_dict:
+                state_dict = state_dict["generator_ema"]
+            elif "generator" in state_dict:
+                state_dict = state_dict["generator"]
+            elif "model" in state_dict:
+                state_dict = state_dict["model"]
+
+            clean_sd = {}
+            for k, v in state_dict.items():
+                new_k = k
+                if not new_k.startswith("model."):
+                    new_k = "model." + new_k
+                clean_sd[new_k] = v
+            self.model.generator.load_state_dict(clean_sd, strict=True)
+        
         self.max_grad_norm_generator = getattr(config, "max_grad_norm_generator", 10.0)
         self.max_grad_norm_critic = getattr(config, "max_grad_norm_critic", 10.0)
         self.previous_time = None
