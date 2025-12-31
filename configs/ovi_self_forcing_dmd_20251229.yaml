@@ -75,7 +75,7 @@ ema_start_step: 200
 total_batch_size: 64
 
 # checkpointing
-log_iters: 3000
+log_iters: 2000
 checkpoints_to_keep: [6000, ]
 num_keep_checkpoints: 2
 video_log_iters: 300
