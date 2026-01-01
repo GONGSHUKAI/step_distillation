@@ -72,7 +72,6 @@ beta2_critic: 0.999
 batch_size: 2 # changing to batch size 1, since the thing is quite large
 ema_weight: 0.99
 ema_start_step: 200
-total_batch_size: 64
 gradient_accumulation_steps: 4
 critic_warmup: 10
 eval_csv: /cpfs01/gongshukai/step_distillation/examples/ode_example.csv

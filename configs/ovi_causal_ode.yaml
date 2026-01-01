@@ -15,7 +15,6 @@ model_name: Ovi
 generator_name: Ovi
 generator_type: causal
 generator_path: /cpfs01/gongshukai/weights/Ovi/Ovi/model.safetensors
-# generator_ckpt: (Optional) Path to resume from, e.g. previous ode checkpoint
 
 ## ODE pretraining settings
 distribution_loss: ode
@@ -36,11 +35,11 @@ mixed_precision: true  # 使用 bf16
 warp_denoising_step: true
 batch_size: 4
 max_pair: 10000000
-# lr: 2.0e-06
-lr: 1.0e-5
+lr: 2.0e-06
 beta1: 0.9
 beta2: 0.999
 weight_decay: 0.01
+gradient_accumulation_steps: 4
 
 ## checkpointing
 log_iters: 5000

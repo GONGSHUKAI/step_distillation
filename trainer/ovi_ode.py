@@ -14,7 +14,7 @@ import torch
 import wandb
 import time
 import os
-
+from tqdm import tqdm
 from utils.distributed import barrier, fsdp_wrap, fsdp_state_dict, launch_distributed_job, fsdp_optim_state_dict
 from ovi.modules.causal_ovi import CausalFusionAttentionBlock # For FSDP wrapping
 
@@ -46,6 +46,11 @@ class Trainer:
         self.device = torch.cuda.current_device()
         self.disable_wandb = config.disable_wandb
         logger.info(f"Using wandb: {not self.disable_wandb}") if self.is_main_process else None
+
+        # === NEW: Gradient Accumulation Setup ===
+        self.gradient_accumulation_steps = getattr(config, "gradient_accumulation_steps", 1)
+        if self.gradient_accumulation_steps > 1 and self.is_main_process:
+            logger.info(f"Using gradient accumulation with {self.gradient_accumulation_steps} steps.")
 
         if config.seed == 0:
             random_seed = torch.randint(0, 10000000, (1,), device=self.device)
@@ -226,10 +231,9 @@ class Trainer:
             torch.save(state_dict, model_path)
             logger.info(f"Model and optimizer saved to {model_path}")
 
-    def train_one_step(self):
-        self.model.eval() # Ovi is trained in Eval mode (no dropout)
-        
-        batch = next(self.dataloader)
+    def fwdbwd_one_step(self, batch):
+        """Forward and backward for one step (no optimizer step)."""
+        self.model.eval()  # Ovi is trained in Eval mode (no dropout)
         
         # [B, 5, 32, 48, H, W]
         video_ode_latent = batch["video_ode_latent"].to(self.device, self.dtype)
@@ -247,30 +251,43 @@ class Trainer:
             conditional_dict=conditional_dict
         )
         
-        # Optimization
-        self.generator_optimizer.zero_grad()
-        loss.backward()
-        grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm)
-        self.generator_optimizer.step()
+        if self.gradient_accumulation_steps > 1:
+            loss = loss / self.gradient_accumulation_steps
         
-        # Logging
-        if self.is_main_process:
-            wandb_log = {
-                "loss": loss.item(),
-                "grad_norm": grad_norm.item(),
-                "video_loss": log_dict["loss_video"].item(),
-                "audio_loss": log_dict["loss_audio"].item()
-            }
-            if not self.config.disable_wandb:
-                wandb.log(wandb_log, step=self.step)
-            
-            logger.info(f"Step {self.step}: ODE Loss={loss.item():.4f}, Video ODE Loss={wandb_log['video_loss']:.4f}, Audio ODE Loss={wandb_log['audio_loss']:.4f}, Grad Norm={wandb_log['grad_norm']}")
+        loss.backward()
+        
+        log_dict.update({
+            "loss": loss * self.gradient_accumulation_steps,  # Log unscaled loss
+        })
+        return log_dict
 
     def train(self):
         start_step = self.step
         while True:
-            self.train_one_step()
+            self.generator_optimizer.zero_grad(set_to_none=True)
+            
+            for accum_step in tqdm(range(self.gradient_accumulation_steps), total=len(range(self.gradient_accumulation_steps)), desc="Gradient accumulating for ODE pretraining", leave=False, disable=(dist.get_rank()!=0)):
+                batch = next(self.dataloader)
+                log_dict = self.fwdbwd_one_step(batch)
+            
+            # Optimizer step after accumulation
+            grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm)
+            self.generator_optimizer.step()
+            
             self.step += 1
+
+            # Logging (use the last step's log_dict)
+            if self.is_main_process:
+                wandb_log = {
+                    "loss": log_dict["loss"].item(),
+                    "grad_norm": grad_norm.item(),
+                    "video_loss": log_dict["loss_video"].item(),
+                    "audio_loss": log_dict["loss_audio"].item()
+                }
+                if not self.config.disable_wandb:
+                    wandb.log(wandb_log, step=self.step)
+                
+                logger.info(f"Step {self.step}: ODE Loss={wandb_log['loss']:.4f}, Video ODE Loss={wandb_log['video_loss']:.4f}, Audio ODE Loss={wandb_log['audio_loss']:.4f}, Grad Norm={wandb_log['grad_norm']:.4f}")
 
             if self.step > 0 and self.step % self.config.log_iters == 0:
                 self.save()
