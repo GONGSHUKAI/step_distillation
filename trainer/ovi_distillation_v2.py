@@ -474,7 +474,7 @@ class Trainer: # MODIFIED: Renamed class
         start_step = self.step
         
         # Critic Warmup Phase (Optional)
-        if self.critic_warmup > 0 and self.step == start_step:
+        if self.critic_warmup > 0 and self.step == 0:
             logger.info(f"Starting critic warmup for {self.critic_warmup} steps...") if self.is_main_process else None
             
             for warmup_step in range(self.critic_warmup):
@@ -487,8 +487,8 @@ class Trainer: # MODIFIED: Renamed class
                 
                 self.critic_optimizer.step()
                 
-                logger.info(f"Critic warmup step {warmup_step + 1}/{self.critic_warmup}, Critic Loss: {critic_log_dict['critic_loss'].mean().item():.4f}") if self.is_main_process else None
-                
+                logger.info(f"Critic warmup step {warmup_step + 1}/{self.critic_warmup}, Critic Loss: {critic_log_dict['critic_loss'].mean().item():.4f}, Critic Video Loss: {critic_log_dict['critic_loss_video'].mean().item():.4f}, Critic Audio Loss: {critic_log_dict['critic_loss_audio'].mean().item():.4f}, GradNorm: {critic_log_dict['critic_grad_norm'].mean().item():.4f}") if self.is_main_process else None
+
                 if warmup_step % self.config.gc_interval == 0:
                     gc.collect()
                     torch.cuda.empty_cache()
