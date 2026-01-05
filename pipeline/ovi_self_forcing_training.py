@@ -6,6 +6,7 @@ from utils.scheduler import SchedulerInterface
 import torch.distributed as dist
 from utils.dataset import masks_like
 import logging
+from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 class OviSelfForcingTrainingPipeline(torch.nn.Module):
@@ -320,3 +321,113 @@ class OviSelfForcingTrainingPipeline(torch.nn.Module):
         denoised_timestep_to = self.denoising_step_list[-1]
 
         return denoised_preds, denoised_timestep_from, denoised_timestep_to
+    
+    def full_inference(
+        self,
+        noises: Tuple[torch.Tensor, torch.Tensor],
+        wan22_image_latent: torch.Tensor,
+        **conditional_dict
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        
+        self.kv_cache_list = None
+
+        noise_video, noise_audio = noises
+        device = noise_video.device
+        dtype = noise_video.dtype
+        num_denoising_steps = len(self.denoising_step_list)
+        B, F_total, C_v, H_v, W_v = noise_video.shape
+        _, L_total, C_a = noise_audio.shape
+        
+        self._initialize_kv_cache_list(B, H_v, W_v, dtype)
+        
+        out_video_latents = torch.zeros_like(noise_video)
+        out_audio_latents = torch.zeros_like(noise_audio)
+        
+        _, mask2 = masks_like(noise_video[:, :self.vid_block_size], zero=True)
+        mask2 = torch.stack(mask2, dim=0).to(device, dtype=dtype)
+        
+        current_start_vid, current_start_audio = 0, 0
+        # if dist.get_rank() == 0:
+        #     print(f"{noise_video.shape=}, {noise_audio.shape=}, {out_video_latents.shape=}, {out_audio_latents.shape}")
+        #     print(f"{self.kv_cache_list[0]['vid_self']['k'].shape=}, {self.kv_cache_list[0]['vid_fusion']['k'].shape=}, {self.kv_cache_list[0]['vid_text']['k'].shape=}")
+        #     print(f"{self.kv_cache_list[0]['aud_self']['k'].shape=}, {self.kv_cache_list[0]['aud_fusion']['k'].shape=}, {self.kv_cache_list[0]['aud_text']['k'].shape=}")
+        for block_idx in tqdm(range(self.num_blocks), total=len(range(self.num_blocks)), leave=False, disable=(dist.get_rank()!=0), desc="Blockwise generation"):
+            is_first_block = (block_idx == 0)
+            curr_noise_v = noise_video[:, block_idx * self.vid_block_size : (block_idx + 1) * self.vid_block_size]
+            curr_noise_a = noise_audio[:, block_idx * self.aud_block_size : (block_idx + 1) * self.aud_block_size]
+            
+            curr_latent_v = curr_noise_v
+            curr_latent_a = curr_noise_a
+            
+            with torch.no_grad():
+                for i, t_val in tqdm(enumerate(self.denoising_step_list), total=len(self.denoising_step_list), disable=(dist.get_rank()!=0), leave=False, desc="Denoising Steps"):
+                    if is_first_block:
+                        curr_latent_v = (1. - mask2) * wan22_image_latent + mask2 * curr_latent_v
+                        curr_latent_v = curr_latent_v.to(dtype)
+                    
+                    t_v = torch.full((B, self.vid_block_size), t_val.item(), dtype=t_val.dtype, device=curr_latent_v.device)
+                    t_a = torch.full((B, self.aud_block_size), t_val.item(), dtype=t_val.dtype, device=curr_latent_a.device)
+                    
+                    x0_v, x0_a, _, _ = self.generator(
+                        video_latent=curr_latent_v,
+                        audio_latent=curr_latent_a,
+                        timestep_v=t_v,
+                        timestep_a=t_a,
+                        conditional_dict=conditional_dict,
+                        kv_cache_list=self.kv_cache_list,
+                        current_start_vid=current_start_vid,
+                        current_start_audio=current_start_audio,
+                        wan22_image_latent=wan22_image_latent if is_first_block else None,
+                        mask2=mask2 if is_first_block else None,
+                        first_frame_is_clean=is_first_block
+                    )
+                    
+                    if i < num_denoising_steps - 1:
+                        next_t = self.denoising_step_list[i + 1]
+                        next_ts_video = torch.full((x0_v.shape[0], x0_v.shape[1]), next_t.item(), device=x0_v.device, dtype=torch.long)
+                        next_ts_audio = torch.full((x0_a.shape[0], x0_a.shape[1]), next_t.item(), device=x0_a.device, dtype=torch.long)
+                        
+                        curr_latent_v = self.scheduler.add_noise(
+                            x0_v.flatten(0, 1),
+                            torch.randn_like(x0_v.flatten(0, 1)),
+                            next_ts_video.flatten(0, 1)
+                        ).unflatten(0, x0_v.shape[:2])
+                        
+                        curr_latent_a = self.scheduler.add_noise(
+                            x0_a.flatten(0, 1),
+                            torch.randn_like(x0_a.flatten(0, 1)),
+                            next_ts_audio.flatten(0, 1)
+                        ).unflatten(0, x0_a.shape[:2])
+            
+            out_video_latents[:, block_idx * self.vid_block_size : (block_idx + 1) * self.vid_block_size] = x0_v
+            out_audio_latents[:, block_idx * self.aud_block_size : (block_idx + 1) * self.aud_block_size] = x0_a
+            
+            with torch.no_grad():
+                t_context_v = torch.ones((B, self.vid_block_size), device=x0_v.device) * self.context_noise
+                t_context_a = torch.ones((B, self.aud_block_size), device=x0_a.device) * self.context_noise
+                if is_first_block:
+                    x0_v = (1. - mask2) * wan22_image_latent + mask2 * x0_v
+                    x0_v = x0_v.to(dtype)
+                self.generator(
+                    video_latent=x0_v,
+                    audio_latent=x0_a,
+                    timestep_v=t_context_v,
+                    timestep_a=t_context_a,
+                    conditional_dict=conditional_dict,
+                    kv_cache_list=self.kv_cache_list,
+                    current_start_vid=current_start_vid,
+                    current_start_audio=current_start_audio,
+                    wan22_image_latent=wan22_image_latent if is_first_block else None,
+                    mask2=mask2 if is_first_block else None,
+                    first_frame_is_clean=is_first_block
+                )
+            
+            current_start_vid += (self.vid_block_size * self.tokens_per_vid_frame)
+            current_start_audio += (self.aud_block_size * self.tokens_per_aud_frame)
+        
+        final_v_lat = out_video_latents[:, :31]
+        final_a_lat = out_audio_latents[:, :157]
+        
+        self.kv_cache_list = None
+
+        return final_v_lat, final_a_lat

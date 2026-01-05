@@ -45,7 +45,7 @@ load_raw_video: false
 model_kwargs:
   timestep_shift: 5.0
 initial_step: 0
-dfake_gen_update_ratio: 5
+dfake_gen_update_ratio: 10
 denoising_step_list: [1000, 750, 500, 250]
 num_train_timestep: 1000
 timestep_shift: 5.0
@@ -78,7 +78,7 @@ eval_csv: /cpfs01/gongshukai/step_distillation/examples/ode_example.csv
 
 
 # checkpointing
-log_iters: 500
+log_iters: 1000
 checkpoints_to_keep: [6000, ]
 num_keep_checkpoints: 2
 video_log_iters: 100

@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from utils.ovi_wrapper import OviFusionWrapper, OviTextEncoder, OviVAEWrapper
 from utils.dataset import OviODERegressionDataset, cycle, masks_like
+from pipeline import OviSelfForcingTrainingPipeline
 import numpy as np
 from model.ovi_base import OviBaseModel
 import logging
@@ -25,6 +26,7 @@ class OviODERegression(OviBaseModel):
         self.num_frame_per_block_aud = 20
         self.num_blocks = 8
         self.num_aud_frame_per_vid = self.num_frame_per_block_aud // self.num_frame_per_block_vid
+        self.inference_pipeline = None
 
     def _initialize_models(self, args, device):
         self.generator_name = getattr(args, "generator_name", "Ovi")    # the student model
@@ -127,6 +129,35 @@ class OviODERegression(OviBaseModel):
             "loss_video": loss_v.detach(),
             "loss_audio": loss_a.detach()
         }
+    
+    def _initialize_inference_pipeline(self):
+        if self.inference_pipeline is None:
+            self.inference_pipeline = OviSelfForcingTrainingPipeline(
+                model_name=self.generator_name,
+                denoising_step_list=self.denoising_step_list,
+                scheduler=self.scheduler,
+                generator=self.generator,
+                num_blocks=self.num_blocks,
+                vid_block_size=self.num_frame_per_block_vid,
+                aud_block_size=self.num_frame_per_block_aud,
+                num_training_frames_video=32,
+                num_training_frames_audio=160,
+                start_gradient_frame_index_video=0,
+                context_noise=0.0,
+                last_step_only=False,
+                same_step_accross_blocks=False,
+            )
+
+    @torch.no_grad()
+    def full_inference(self, noises, wan22_image_latent, **conditional_dict):
+        if self.inference_pipeline is None:
+            self._initialize_inference_pipeline()
+        
+        return self.inference_pipeline.full_inference(
+            noises=noises,
+            wan22_image_latent=wan22_image_latent,
+            **conditional_dict
+        )
     
 class OviODERegressionDebug(OviBaseModel):
     def __init__(self, args, device):

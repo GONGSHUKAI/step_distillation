@@ -2,7 +2,7 @@
 
 import gc
 import logging
-from utils.dataset import OviODERegressionDataset, cycle
+from utils.dataset import OviODERegressionDataset, cycle, process_visual
 from model.ovi_ode_regression import OviODERegression # <--- Will define this next
 from collections import defaultdict
 from utils.misc import set_seed, merge_dict_list
@@ -17,6 +17,10 @@ import os
 from tqdm import tqdm
 from utils.distributed import barrier, fsdp_wrap, fsdp_state_dict, launch_distributed_job, fsdp_optim_state_dict
 from ovi.modules.causal_ovi import CausalFusionAttentionBlock # For FSDP wrapping
+from ovi.utils.io_utils import save_video
+import csv
+import tempfile
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,7 @@ class Trainer:
         if self.gradient_accumulation_steps > 1 and self.is_main_process:
             logger.info(f"Using gradient accumulation with {self.gradient_accumulation_steps} steps.")
 
+        self.video_log_iter = self.config.video_log_iters
         if config.seed == 0:
             random_seed = torch.randint(0, 10000000, (1,), device=self.device)
             dist.broadcast(random_seed, src=0)
@@ -84,7 +89,6 @@ class Trainer:
         if pretrained_ckpt_path is not None:
             logger.info(f"Loading checkpoint from {pretrained_ckpt_path} at step {self.step}") if self.is_main_process else None
             state_dict = torch.load(pretrained_ckpt_path, map_location="cpu")
-            logger.info(f"Loaded: {state_dict.keys()=} on {dist.get_rank()}")
             self.model.generator.load_state_dict(state_dict["generator"], strict=True)
             logger.info(f"Checkpoint at step {self.step} loaded") if self.is_main_process else None
         else:
@@ -119,6 +123,8 @@ class Trainer:
         fsdp_text = sum(p.numel() for p in self.model.text_encoder.parameters() if p.requires_grad)
         logger.info(f"After FSDP, text encoder parameters: {fsdp_text/1e9:.2f}B") if self.is_main_process else None
 
+        self.model.vae = self.model.vae.to(device=self.device, dtype=self.dtype)
+        
         # Optimizer
         logger.info("Setting up optimizers...") if self.is_main_process else None
         self.generator_optimizer = torch.optim.AdamW(
@@ -231,6 +237,96 @@ class Trainer:
             torch.save(state_dict, model_path)
             logger.info(f"Model and optimizer saved to {model_path}")
 
+    def _load_eval_csv(self, csv_path: str, max_len=5):
+        eval_data = []
+        if not os.path.exists(csv_path): return eval_data
+        with open(csv_path, 'r') as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            for row in reader:
+                if len(row) >= 2:
+                    eval_data.append({
+                        "prompt": row[0],
+                        "image_path": row[1],
+                        "seed": int(row[2]) if len(row) > 2 else 0  # default seed is 0
+                    })
+        eval_data = eval_data[:max_len] if len(eval_data) > max_len else eval_data
+        return eval_data
+
+    @torch.no_grad()
+    def run_eval(self) -> dict:
+        eval_csv_path = getattr(self.config, "eval_csv", None)
+        if eval_csv_path is None or not os.path.exists(eval_csv_path):
+            if self.is_main_process:
+                logger.warning(f"Eval CSV not found: {eval_csv_path}")
+            return {}
+        
+        eval_data = self._load_eval_csv(eval_csv_path)
+        if len(eval_data) == 0:
+            if self.is_main_process:
+                logger.warning("Eval CSV is empty")
+            return {}
+        
+        eval_videos = []
+        
+        for idx, sample in tqdm(enumerate(eval_data), total=len(eval_data), disable=(dist.get_rank()!=0), desc="Running ODE Eval"):
+            prompt = sample["prompt"]
+            image_path = sample["image_path"]
+            # set_seed(sample["seed"])
+
+            image_exists = image_path and os.path.exists(image_path)
+            if image_exists:
+                processed_frame = process_visual(image_path, w=1280, h=704) # 对应配置中的尺寸
+                processed_frame = processed_frame.to(self.device, dtype=self.dtype)
+                wan22_image_latent = self.model.vae.encode_video(processed_frame.unsqueeze(2))
+                
+                conditional_dict = self.model.text_encoder(text_prompts=[prompt])
+                conditional_dict = {
+                    "video_prompt_embeds": conditional_dict["prompt_embeds"].detach(),
+                    "audio_prompt_embeds": conditional_dict["prompt_embeds"].detach(),
+                }
+                
+                video_latent_shape = self.config.video_latent_shape
+                audio_latent_shape = self.config.audio_latent_shape
+                noise_video = torch.randn(1, *video_latent_shape, device=self.device, dtype=self.dtype)
+                noise_audio = torch.randn(1, *audio_latent_shape, device=self.device, dtype=self.dtype)
+                noises = (noise_video, noise_audio)
+                
+                video_latent, audio_latent = self.model.full_inference(
+                    noises=noises,
+                    wan22_image_latent=wan22_image_latent,
+                    **conditional_dict
+                )
+                
+                video = self.model.vae.decode_video(video_latent)
+                audio = self.model.vae.decode_audio(audio_latent.transpose(1, 2))
+
+                if self.is_main_process:
+                    video = ((video + 1) / 2 * 255).clip(0, 255)
+                    video_np = video.squeeze(0).permute(1, 0, 2, 3).cpu().float().numpy().astype(np.uint8)
+                    audio_np = audio.squeeze(0).cpu().float().numpy().flatten()
+                    
+                    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+                        save_video(f.name, video_np, audio_np)
+                        eval_videos.append({"path": f.name, "idx": idx})
+                
+                # All ranks clean up
+                torch.cuda.empty_cache()
+            else: 
+                # Image not found - all ranks skip but still sync
+                logger.warning(f"Image not found: {image_path}, skipping sample {idx}") if self.is_main_process else None
+            
+            if dist.is_initialized():
+                dist.barrier()
+        
+        wandb_log = {}
+        if self.is_main_process:
+            for item in eval_videos:
+                wandb_log[f"Evaluation/Sample_{item['idx']}"] = wandb.Video(item["path"], format="mp4")
+        
+        return wandb_log
+
+
     def fwdbwd_one_step(self, batch):
         """Forward and backward for one step (no optimizer step)."""
         self.model.eval()  # Ovi is trained in Eval mode (no dropout)
@@ -264,6 +360,7 @@ class Trainer:
     def train(self):
         start_step = self.step
         while True:
+            LOG_VIDEO = self.step % self.video_log_iter == 0
             self.generator_optimizer.zero_grad(set_to_none=True)
             
             for accum_step in tqdm(range(self.gradient_accumulation_steps), total=len(range(self.gradient_accumulation_steps)), desc="Gradient accumulating for ODE pretraining", leave=False, disable=(dist.get_rank()!=0)):
@@ -277,6 +374,15 @@ class Trainer:
             self.step += 1
 
             # Logging (use the last step's log_dict)
+            if LOG_VIDEO: 
+                logger.info(f"Step {self.step}: Running on-the-fly evaluation...") if self.is_main_process else None
+                try:
+                    eval_wandb_log = self.run_eval()
+                    if self.is_main_process and not self.config.disable_wandb:
+                        wandb.log(eval_wandb_log, step=self.step)
+                except Exception as e:
+                    logger.error(f"Eval failed at step {self.step}: {e}") if self.is_main_process else None
+
             if self.is_main_process:
                 wandb_log = {
                     "loss": log_dict["loss"].item(),

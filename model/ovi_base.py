@@ -274,6 +274,21 @@ class OviSelfForcingModel(OviBaseModel):
             noises=noises, wan22_image_latent=wan22_image_latent, **conditional_dict
         )
 
+    def full_inference(
+        self,
+        noises: Tuple[torch.Tensor, torch.Tensor],
+        wan22_image_latent: torch.Tensor,
+        **conditional_dict
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.inference_pipeline is None:
+            self._initialize_inference_pipeline()
+        
+        return self.inference_pipeline.full_inference(
+            noises=noises,
+            wan22_image_latent=wan22_image_latent,
+            **conditional_dict
+        )
+    
     def _initialize_inference_pipeline(self):
         """
         MODIFIED FOR OVI: Initialize a pipeline that supports dual branches.

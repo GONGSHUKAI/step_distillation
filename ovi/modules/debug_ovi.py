@@ -409,6 +409,7 @@ def causal_fusion_logic(
 ):
     b, s_q, n, d = q_src.shape
     
+    # 1. Projection (Weights from module_container)
     target_seq_norm = module_container.pre_attn_norm_fusion(target_seq)
     k = module_container.norm_k_fusion(module_container.k_fusion(target_seq_norm)).view(b, -1, n, d)
     v = module_container.v_fusion(target_seq_norm).view(b, -1, n, d)
@@ -420,6 +421,7 @@ def causal_fusion_logic(
     current_max_attn_size = 28160 if local_attn_size == -1 else local_attn_size * tpf_target
 
     if fusion_cache is not None:
+        # Inference (Rolling Cache)
         q_src = causal_rope_apply(q_src, grid_sizes_src, freqs_src, start_index=current_start, tokens_per_frame=tpf_src)
         k = causal_rope_apply(k, grid_sizes_target, freqs_target, start_index=cache_start, tokens_per_frame=tpf_target)
         
@@ -428,37 +430,59 @@ def causal_fusion_logic(
         num_new_tokens = k.shape[1]
         current_end = cache_start + num_new_tokens
         
+        # Only check for eviction if we are strictly moving forward (Append mode)
         if local_attn_size != -1 and (current_end > fusion_cache["global_end_index"].item()) and \
            (num_new_tokens + fusion_cache["local_end_index"].item() > kv_cache_size):
+            # Calculate the number of new tokens added in this step
+            # Shift existing cache content left to discard oldest tokens
             num_evicted_tokens = num_new_tokens + fusion_cache["local_end_index"].item() - kv_cache_size
             num_rolled_tokens = fusion_cache["local_end_index"].item() - num_evicted_tokens - real_sink_tokens
-            
+            # Clone to avoid overlapping memory error
             fusion_cache["k"][:, real_sink_tokens : real_sink_tokens + num_rolled_tokens] = \
                 fusion_cache["k"][:, real_sink_tokens + num_evicted_tokens : real_sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
             fusion_cache["v"][:, real_sink_tokens : real_sink_tokens + num_rolled_tokens] = \
                 fusion_cache["v"][:, real_sink_tokens + num_evicted_tokens : real_sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
             
+            # Insert the new keys/values at the end
+            # Overwrite (去噪): current_end == global_end_index。跳过 Eviction 判断。利用公式 local_end = local_end + (current_end - global_end) 计算出的偏移量为 0，从而实现原地覆盖。
+            # Append (新Block): current_end > global_end_index。进入 Eviction 判断。
             local_end_index = fusion_cache["local_end_index"].item() + current_end - fusion_cache["global_end_index"].item() - num_evicted_tokens
             local_start_index = local_end_index - num_new_tokens
             
-            fusion_cache["k"][:, local_start_index : local_end_index] = k
-            fusion_cache["v"][:, local_start_index : local_end_index] = v
+            fusion_cache["k"][:, local_start_index : local_end_index] = k.detach()
+            fusion_cache["v"][:, local_start_index : local_end_index] = v.detach()
 
         else:
+            # print(f'{current_start=}, {cache_start=}')
+            # print(f'{fusion_cache["local_end_index"].item()=}, {current_end=}, {fusion_cache["global_end_index"].item()=}')
+
+            # Assign new keys/values directly up to current_end
+            # Overwrite (去噪): current_end == global_end_index, 利用公式 local_end = local_end + (current_end - global_end) 计算出的偏移量为 0，从而实现原地覆盖。
+            # Append (新Block): current_end > global_end_index
             local_end_index = fusion_cache["local_end_index"].item() + current_end - fusion_cache["global_end_index"].item()
             local_start_index = local_end_index - num_new_tokens
             
-            fusion_cache["k"][:, local_start_index : local_end_index] = k
-            fusion_cache["v"][:, local_start_index : local_end_index] = v
+            fusion_cache["k"][:, local_start_index : local_end_index] = k.detach()
+            fusion_cache["v"][:, local_start_index : local_end_index] = v.detach()
 
         fusion_cache["global_end_index"].fill_(current_end)
         fusion_cache["local_end_index"].fill_(local_end_index)
         
         att_start = max(0, local_end_index - current_max_attn_size)
-        k_view = fusion_cache["k"][:, att_start:local_end_index]
-        v_view = fusion_cache["v"][:, att_start:local_end_index]
+        # NOTE: shukai added on Dec 27, 2025. KV Cache, no matter what, should have no gradient
+        # k_view = fusion_cache["k"][:, att_start:local_end_index]
+        # v_view = fusion_cache["v"][:, att_start:local_end_index]
+        k_view = torch.cat([fusion_cache["k"][:, att_start:local_start_index], k], dim=1)   # NOTE: shukai: att_start:local_start_index: no gradient, local_start_index:local_end_index: with gradient
+        v_view = torch.cat([fusion_cache["v"][:, att_start:local_start_index], v], dim=1)   # NOTE: shukai: att_start:local_start_index: no gradient, local_start_index:local_end_index: with gradient
+        # NOTE: ermu2001: debugging
+        # if torch.distributed.get_rank() == 0:
+        #     print(f"At causal fusion logic: {local_start_index=}, {local_end_index=}")
+        #     print(f"{k_view.shape=}, {k_view.requires_grad=}, {v_view.shape=}, {v_view.requires_grad=}, {q_src.shape=}, {q_src.requires_grad=}")
+        #     print(f'{fusion_cache["k"].shape=}, {fusion_cache["v"].shape=}')
+        #     print(f'{fusion_cache["k"].requires_grad=}, {fusion_cache["v"].requires_grad=}')
         x = attention(q_src, k_view, v_view)
     else:
+        # Training
         q_src = rope_apply(q_src, grid_sizes_src, freqs_src)
         k = rope_apply(k, grid_sizes_target, freqs_target)
         s_kv = k.shape[1]
@@ -528,27 +552,38 @@ class CausalWanSelfAttention(nn.Module):
                 kv_cache["v"][:, sink_tokens : sink_tokens + num_rolled_tokens] = \
                     kv_cache["v"][:, sink_tokens + num_evicted_tokens : sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
                 
+                # Insert the new keys/values at the end
                 local_end_index = kv_cache["local_end_index"].item() + current_end - \
                     kv_cache["global_end_index"].item() - num_evicted_tokens
                 local_start_index = local_end_index - num_new_tokens
                 
-                kv_cache["k"][:, local_start_index : local_end_index] = k_rope
-                kv_cache["v"][:, local_start_index : local_end_index] = v
+                kv_cache["k"][:, local_start_index : local_end_index] = k_rope.detach()
+                kv_cache["v"][:, local_start_index : local_end_index] = v.detach()
             else:
+                # Assign new keys/values directly up to current_end
                 local_end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
                 local_start_index = local_end_index - num_new_tokens
                 
-                kv_cache["k"][:, local_start_index : local_end_index] = k_rope
-                kv_cache["v"][:, local_start_index : local_end_index] = v
+                kv_cache["k"][:, local_start_index : local_end_index] = k_rope.detach()
+                kv_cache["v"][:, local_start_index : local_end_index] = v.detach()
 
             kv_cache["global_end_index"].fill_(current_end)
             kv_cache["local_end_index"].fill_(local_end_index)
             
             att_start = max(0, local_end_index - self.max_attention_size)
+            # NOTE: ermu2001: debugging
+            # if torch.distributed.get_rank() == 0:
+            #     print(f"At self attention: {local_start_index=}, {local_end_index=}")
+            #     print(f"{k_rope.shape=}, {k_rope.requires_grad=}, {v.shape=}, {v.requires_grad=}, {q_rope.shape=}, {q_rope.requires_grad=}")
+            #     print(f"{kv_cache['k'].shape=}, {kv_cache['v'].shape=}")
+            #     print(f"{kv_cache['k'].requires_grad=}, {kv_cache['v'].requires_grad=}")
+            # NOTE: shukai added on Dec 27, 2025. KV Cache, no matter what, should have no gradient
             x = attention(
                 q_rope, 
-                kv_cache["k"][:, att_start:local_end_index], 
-                kv_cache["v"][:, att_start:local_end_index]
+                # kv_cache["k"][:, att_start:local_end_index], 
+                # kv_cache["v"][:, att_start:local_end_index]
+                torch.cat([kv_cache["k"][:, att_start:local_start_index], k_rope], dim=1), # NOTE: shukai: att_start:local_start_index: no gradient, local_start_index:local_end_index: with gradient
+                torch.cat([kv_cache["v"][:, att_start:local_start_index], v], dim=1),      # NOTE: shukai: att_start:local_start_index: no gradient, local_start_index:local_end_index: with gradient
             )
         else:
             q = rope_apply(q, grid_sizes, freqs)
@@ -972,17 +1007,38 @@ class CausalFusionModel(ModelMixin, ConfigMixin):
             if slg_layer > 0 and i == slg_layer: continue
             
             caches = kv_cache_list[i]
-            vid_h, audio_h = gradient_checkpointing(
-                block, 
-                vid_h, 
-                audio_h, 
-                enabled=self.gradient_checkpointing,
-                block_idx=i, # Pass block_idx for tracing
-                vid_self_cache=caches['vid_self'], audio_self_cache=caches['aud_self'],
-                vid_fusion_cache=caches['vid_fusion'], audio_fusion_cache=caches['aud_fusion'],
-                vid_text_cache=caches['vid_text'], audio_text_cache=caches['aud_text'],
-                **all_kwargs
+
+            kwargs = dict(
+                block_idx=i,
+                vid_self_cache=caches['vid_self'],
+                audio_self_cache=caches['aud_self'],
+                vid_fusion_cache=caches['vid_fusion'],
+                audio_fusion_cache=caches['aud_fusion'],
+                # NOTE: 
+                # vid_text_cache=caches['vid_text'],
+                # audio_text_cache=caches['aud_text'],
             )
+            # if torch.distributed.get_rank() == 0:
+            #     print(f"{torch.is_grad_enabled()=}")
+            if torch.is_grad_enabled():
+                vid_h, audio_h = gradient_checkpointing(
+                    block, 
+                    vid_h, 
+                    audio_h, 
+                    enabled=self.gradient_checkpointing,
+                    **kwargs,
+                    **all_kwargs
+                )
+                # vid_h, audio_h = block(vid_h, audio_h, **kwargs, **all_kwargs)
+            else:
+                all_kwargs.update(dict(
+                    # vid_fusion_cache=caches['vid_fusion'],
+                    # audio_fusion_cache=caches['aud_fusion'],
+                    vid_text_cache=caches['vid_text'],
+                    audio_text_cache=caches['aud_text'],
+                ))
+                vid_h, audio_h = block(vid_h, audio_h, **kwargs, **all_kwargs)
+
             
         vid_out = self.post_transformer_block_out(vid_h, vid_kwargs['grid_sizes'], vid_e_base, True)
         audio_out = self.post_transformer_block_out(audio_h, audio_kwargs['grid_sizes'], audio_e_base, False)
