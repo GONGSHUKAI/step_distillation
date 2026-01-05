@@ -110,8 +110,13 @@ class OviODERegression(OviBaseModel):
             first_frame_is_clean=True,
         )
 
-        mask_v = torch.cat((torch.ones([B, 31]), torch.zeros([B, 1])), dim=1).view(B, 32, 1, 1, 1).expand_as(x0_video).bool() 
-        mask_a = torch.cat((torch.ones([B, 157]), torch.zeros([B, 3])), dim=1).view(B, 160, 1).expand_as(x0_audio).bool() 
+        mask_pad_v = torch.cat((torch.ones([B, 31]), torch.zeros([B, 1])), dim=1).to(self.device)
+        mask_pad_a = torch.cat((torch.ones([B, 157]), torch.zeros([B, 3])), dim=1).to(self.device)
+        mask_t_v = (timestep_v != 0)  # [B, 32]
+        mask_t_a = (timestep_a != 0)  # [B, 160]
+
+        mask_v = (mask_pad_v * mask_t_v).view(B, 32, 1, 1, 1).expand_as(x0_video).bool()
+        mask_a = (mask_pad_a * mask_t_a).view(B, 160, 1).expand_as(x0_audio).bool()
 
         loss_v = F.mse_loss(x0_video[mask_v], target_video_latent[mask_v], reduction="mean")
         loss_a = F.mse_loss(x0_audio[mask_a], target_audio_latent[mask_a], reduction="mean")
@@ -210,6 +215,28 @@ class OviODERegressionDebug(OviBaseModel):
         print(f"In OviODERegression, timestep_v shape: {timestep_v.shape}, timestep_v: {timestep_v}")
         print(f"In OviODERegression, timestep_a shape: {timestep_a.shape}, timestep_a: {timestep_a}")
         
+        with torch.no_grad():
+            print(f"saving noisy input for debugging.")
+            noisy_video_lat = noisy_video_input[0, :-1].unsqueeze(0).to(device, dtype)
+            noisy_audio_lat = noisy_audio_input[0, :-3].unsqueeze(0).transpose(1, 2).to(device, dtype)
+
+            print(f"noisy shape: {noisy_video_lat.shape, noisy_audio_lat.shape}")
+
+            model.vae.to(device, dtype)
+            noisy_video = model.vae.decode_video(noisy_video_lat) # [B, C, F, H, W]
+            noisy_audio = model.vae.decode_audio(noisy_audio_lat) # [B, L]
+            noisy_video = ((noisy_video + 1) / 2 * 255).clip(0, 255)
+
+
+            noisy_video_np = noisy_video.squeeze(0).permute(1, 0, 2, 3).cpu().float().numpy().astype(np.uint8)
+            noisy_audio_np = noisy_audio.squeeze(0).cpu().float().numpy().flatten()
+
+            save_video(
+                output_path="noisy_video.mp4",
+                video_numpy=noisy_video_np,
+                audio_numpy=noisy_audio_np
+            )
+
         x0_video, x0_audio, _, _ = self.generator(
             video_latent=noisy_video_input,
             audio_latent=noisy_audio_input,
@@ -222,8 +249,13 @@ class OviODERegressionDebug(OviBaseModel):
             first_frame_is_clean=True,
         )
 
-        mask_v = torch.cat((torch.ones([B, 31]), torch.zeros([B, 1])), dim=1).view(B, 32, 1, 1, 1).expand_as(x0_video).bool() 
-        mask_a = torch.cat((torch.ones([B, 157]), torch.zeros([B, 3])), dim=1).view(B, 160, 1).expand_as(x0_audio).bool() 
+        mask_pad_v = torch.cat((torch.ones([B, 31]), torch.zeros([B, 1])), dim=1).to(self.device)
+        mask_pad_a = torch.cat((torch.ones([B, 157]), torch.zeros([B, 3])), dim=1).to(self.device)
+        mask_t_v = (timestep_v != 0)  # [B, 32]
+        mask_t_a = (timestep_a != 0)  # [B, 160]
+
+        mask_v = (mask_pad_v * mask_t_v).view(B, 32, 1, 1, 1).expand_as(x0_video).bool()
+        mask_a = (mask_pad_a * mask_t_a).view(B, 160, 1).expand_as(x0_audio).bool()
         # mask_v_more = torch.cat((torch.zeros([B, 1]), torch.ones([B, 30]), torch.zeros([B, 1])), dim=1).view(B, 32, 1, 1, 1).expand_as(x0_video).bool() 
         with torch.no_grad():
             print(f"saving ground truth and model prediction for debugging.")
@@ -261,14 +293,15 @@ class OviODERegressionDebug(OviBaseModel):
                 video_numpy=pred_video_np,
                 audio_numpy=pred_audio_np
             )
-
-        # print(x0_video[mask_v].shape, x0_audio[mask_a].shape)
+        # print(f"{x0_video[mask_v].shape=}, {x0_audio[mask_a].shape=}")
         # x0_video[mask_v].shape: torch.Size([10475520]) = 2 * 31 * 48 * 44 * 80
         # x0_audio[mask_a].shape: torch.Size([6280]) = 2 * 157 * 20
         loss_v = F.mse_loss(x0_video[mask_v], target_video_latent[mask_v], reduction="mean")
         loss_a = F.mse_loss(x0_audio[mask_a], target_audio_latent[mask_a], reduction="mean")
-        # loss_v_more = F.mse_loss(x0_video[mask_v_more], target_video_latent[mask_v_more], reduction="mean")
-        # print(f"Loss video more: {loss_v_more}")
+        
+        # loss_v_less = F.mse_loss(x0_video[mask_pad_v.view(B, 32, 1, 1, 1).expand_as(x0_video).bool()], target_video_latent[mask_pad_v.view(B, 32, 1, 1, 1).expand_as(x0_video).bool()], reduction="mean")
+        # loss_a_less = F.mse_loss(x0_audio[mask_pad_a.view(B, 160, 1).expand_as(x0_audio).bool()], target_audio_latent[mask_pad_a.view(B, 160, 1).expand_as(x0_audio).bool()], reduction="mean")
+        # print(f"Loss video without eliminating timestep=0: {loss_v_less=}, {loss_a_less=}")
         total_loss = 0.85 * loss_v + 0.15 * loss_a
         
         return total_loss, {
@@ -306,7 +339,7 @@ if __name__ == "__main__":
             self.model_name = "Ovi"
             self.generator_name = "Ovi"
             self.generator_type = "causal"
-            self.generator_path = "/cpfs01/gongshukai/step_distillation/logs/ovi_ode_init/checkpoint_model_002000/model.pt"
+            self.generator_path = "/cpfs01/gongshukai/step_distillation/logs/ovi_ode_init/checkpoint_model_005000/model.pt"
 
             self.model_kwargs = {
                 "timestep_shift": 5.0
@@ -324,7 +357,7 @@ if __name__ == "__main__":
     dtype = torch.bfloat16 if args.mixed_precision else torch.float32
 
     
-    dataset = OviODERegressionDataset(data_path="/root/ermu2001/CODES/Ovi/tmp/outputs/20251219")
+    dataset = OviODERegressionDataset(data_path="/cpfs01/gongshukai/step_distillation/data/ode_pairs_debug")
     sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=True, drop_last=True)
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=2, sampler=sampler, num_workers=4

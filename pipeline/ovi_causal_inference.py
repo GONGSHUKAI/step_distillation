@@ -176,7 +176,7 @@ class OviCausalInferencePipeline(torch.nn.Module):
             out_video_latents[:, block_idx * self.vid_block_size : (block_idx + 1) * self.vid_block_size] = x0_v
             out_audio_latents[:, block_idx * self.aud_block_size : (block_idx + 1) * self.aud_block_size] = x0_a
             
-            self.save_video_debug(x0_v, x0_a, block_idx)
+            # self.save_video_debug(x0_v, x0_a, block_idx)
 
             # Step 4.3: Update KV Cache with clean latent (i.e. latent denoised in the final timestep).
             with torch.no_grad():

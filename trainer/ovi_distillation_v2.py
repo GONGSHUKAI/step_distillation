@@ -9,14 +9,20 @@ import wandb
 import time
 import os
 from omegaconf import OmegaConf
+import csv
+from PIL import Image
+import numpy as np
+import tempfile
+from tqdm import tqdm
 
 # --- OVI IMPORTS ---
-from model.ovi_dmd import OviDMD # MODIFIED: Import OviDMD
-from utils.dataset import OviCSVDataset, OviCSVImageVideoDataset, cycle, OffsetDistributedSampler # MODIFIED: You need a new dataset class
+from model.ovi_dmd import OviDMD
+from utils.dataset import OviCSVDataset, OviCSVImageVideoDataset, cycle, OffsetDistributedSampler, masks_like
 from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job, fsdp_optim_state_dict
 from utils.misc import set_seed, merge_dict_list
 from ovi.modules.ovi import FusionAttentionBlock
 from ovi.modules.causal_ovi import CausalFusionAttentionBlock
+from ovi.utils.io_utils import save_video
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +38,7 @@ class Trainer: # MODIFIED: Renamed class
         self.config = config
         self.step = 0
 
-        # --- Step 1: Distributed Environment Setup (No changes needed) ---
+        # --- Step 1: Distributed Environment Setup ---
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         launch_distributed_job()
@@ -46,6 +52,24 @@ class Trainer: # MODIFIED: Renamed class
         self.disable_wandb = config.disable_wandb
         logger.info(f"Using wandb: {not self.disable_wandb}") if self.is_main_process else None
         
+        # === NEW: Gradient Accumulation Setup ===
+        self.gradient_accumulation_steps = getattr(config, "gradient_accumulation_steps", 1)
+        if self.gradient_accumulation_steps > 1 and self.is_main_process:
+            logger.info(f"Using gradient accumulation with {self.gradient_accumulation_steps} steps.")
+        
+        # === NEW: Critic Warmup Setup ===
+        self.critic_warmup = getattr(config, "critic_warmup", 0)
+        if self.critic_warmup > 0 and self.is_main_process:
+            logger.info(f"Critic warmup enabled for {self.critic_warmup} steps.")
+
+        # # === NEW: Eval CSV Setup ===
+        # self.eval_csv = getattr(config, "eval_csv", None)
+        # self.eval_data = None
+        # if self.eval_csv is not None and os.path.exists(self.eval_csv):
+        #     self.eval_data = self._load_eval_csv(self.eval_csv)
+        #     if self.is_main_process:
+        #         logger.info(f"Loaded {len(self.eval_data)} samples from eval_csv: {self.eval_csv}")       
+
         if config.seed == 0:
             random_seed = torch.randint(0, 10000000, (1,), device=self.device)
             dist.broadcast(random_seed, src=0)
@@ -67,7 +91,7 @@ class Trainer: # MODIFIED: Renamed class
             raise ValueError("Ovi trainer currently only supports 'dmd' loss")
         logger.info(f"Finished initializing the distillation model.") if self.is_main_process else None
 
-        # --- Step 5 (If resuming) Load the model and optimizer, lr_scheduler, ema's statedicts
+        # --- Step 3: (If resuming) Load the model and optimizer, lr_scheduler, ema's statedicts ---
         if getattr(config, "generator_ckpt", False):
             logger.info(f"Loading pretrained generator from {config.generator_ckpt}") if dist.get_rank() == 0 else None
             generator_state_dict = torch.load(config.generator_ckpt, map_location="cpu")
@@ -82,8 +106,7 @@ class Trainer: # MODIFIED: Renamed class
             gc.collect()
             torch.cuda.empty_cache()
 
-        # ... (Resuming, FSDP wrapping, optimizer setup is mostly the same)
-        # Note: The wrappers inside OviDMD's __init__ are already Ovi-specific
+        # --- Step 4: Load checkpoint if resuming ---
         pretrained_ckpt_path, self.step = self.load(self.output_path)
         if pretrained_ckpt_path is not None:
             logger.info(f"Loading checkpoint from {pretrained_ckpt_path} at step {self.step}") if self.is_main_process else None
@@ -95,9 +118,7 @@ class Trainer: # MODIFIED: Renamed class
             logger.info("No checkpoint found, training from scratch.") if self.is_main_process else None
             state_dict = None
 
-        # self.fake_score_state_dict_cpu = self.model.fake_score.state_dict()
-
-        # FSDP Wrapping
+        # --- Step 5: FSDP Wrapping (assumed done in OviDMD.__init__ or here) ---
         logger.info("Wrapping model components with FSDP...") if self.is_main_process else None
         logger.info(f"Before FSDP, model architecture: {self.model.generator}") if self.is_main_process else None
         orig_student = sum(p.numel() for p in self.model.generator.parameters() if p.requires_grad)
@@ -160,7 +181,7 @@ class Trainer: # MODIFIED: Renamed class
         logger.info("Finished wrapping model components with FSDP.") if self.is_main_process else None
         logger.info(f"GPU memory after FSDP wrapping: {torch.cuda.memory_allocated(self.device)/1e9:.2f} GB") if self.is_main_process else None
 
-        # Optimizers
+        # --- Step 6: Setup optimizers ---
         logger.info("Setting up optimizers...") if self.is_main_process else None
         self.generator_optimizer = torch.optim.AdamW(
             [p for p in self.model.generator.parameters() if p.requires_grad], 
@@ -196,8 +217,8 @@ class Trainer: # MODIFIED: Renamed class
                         state_dict["critic_optimizer"]
                     )
                 )
-        # --- Step 3: Initialize the OVI dataloader ---
-        # MODIFIED: Use a dataset that returns both video and audio
+
+        # --- Step 7: Setup dataloader ---
         logger.info(f"Setting up dataset and dataloader...") if self.is_main_process else None
         dataset = OviCSVImageVideoDataset(
             config.data_path,
@@ -218,8 +239,8 @@ class Trainer: # MODIFIED: Renamed class
                                                  drop_last=True)
         self.dataloader = cycle(dataloader)
         logger.info(f"Finished setting up dataset and dataloader, dataset class name: {dataset.__class__.__name__}, size: {len(dataset)}, batch size: {config.batch_size}") if self.is_main_process else None
-        
-        # --- Step 4: (EMA setup, checkpoint loading, etc. are the same as before) ---
+
+        # --- Step 8: Setup EMA ---
         logger.info("Setting up EMA parameters...") if self.is_main_process else None
         rename_param = (
             lambda name: name.replace("_fsdp_wrapped_module.", "")
@@ -249,6 +270,7 @@ class Trainer: # MODIFIED: Renamed class
                 else:
                     logger.info("No generator_ema found in checkpoint, starting fresh EMA")
         logger.info("Finished setting up EMA parameters.") if self.is_main_process else None
+
         self.max_grad_norm_generator = getattr(config, "max_grad_norm_generator", 10.0)
         self.max_grad_norm_critic = getattr(config, "max_grad_norm_critic", 10.0)
         self.previous_time = None
@@ -271,6 +293,22 @@ class Trainer: # MODIFIED: Renamed class
         
         if dist.is_initialized():
             dist.barrier()
+
+    def _load_eval_csv(self, csv_path):
+        eval_data = []
+        with open(csv_path, 'r') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) >= 2:
+                    prompt = row[0]
+                    image_path = row[1] if len(row) > 1 else None
+                    seed = int(row[2]) if len(row) > 2 else 42
+                    eval_data.append({
+                        "prompt": prompt,
+                        "image_path": image_path,
+                        "seed": seed
+                    })
+        return eval_data
 
     def load(self, out_path):
         # 1. Find latest checkpoint folder (ranked by step)
@@ -396,10 +434,15 @@ class Trainer: # MODIFIED: Renamed class
                 log_video=log_video,
             )
             torch.cuda.empty_cache()
+            
+            # === MODIFIED: Scale loss for gradient accumulation ===
+            if self.gradient_accumulation_steps > 1:
+                generator_loss = generator_loss / self.gradient_accumulation_steps
+            
             generator_loss.backward()
             generator_grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm_generator)
             generator_log_dict.update({
-                "generator_loss": generator_loss,
+                "generator_loss": generator_loss * self.gradient_accumulation_steps,  # Log unscaled loss
                 "generator_grad_norm": generator_grad_norm}
             )
             return generator_log_dict
@@ -413,10 +456,15 @@ class Trainer: # MODIFIED: Renamed class
             unconditional_dict=unconditional_dict,
             wan22_image_latent=wan22_image_latent,
         )
+        
+        # === MODIFIED: Scale loss for gradient accumulation ===
+        if self.gradient_accumulation_steps > 1:
+            critic_loss = critic_loss / self.gradient_accumulation_steps
+            
         critic_loss.backward()
         critic_grad_norm = self.model.fake_score.clip_grad_norm_(self.max_grad_norm_critic)
         critic_log_dict.update({
-            "critic_loss": critic_loss,
+            "critic_loss": critic_loss * self.gradient_accumulation_steps,  # Log unscaled loss
             "critic_grad_norm": critic_grad_norm}
         )
         return critic_log_dict
@@ -424,6 +472,29 @@ class Trainer: # MODIFIED: Renamed class
     def train(self):
         # --- MODIFIED FOR OVI LOGGING ---
         start_step = self.step
+        
+        # Critic Warmup Phase (Optional)
+        if self.critic_warmup > 0 and self.step == 0:
+            logger.info(f"Starting critic warmup for {self.critic_warmup} steps...") if self.is_main_process else None
+            
+            for warmup_step in range(self.critic_warmup):
+                self.critic_optimizer.zero_grad(set_to_none=True)
+                
+                # Accumulate gradients for critic warmup (support gradient accumulation)
+                for accum_step in tqdm(range(self.gradient_accumulation_steps), total=len(range(self.gradient_accumulation_steps)), desc="Gradient accumulating for critic", leave=False, disable=(dist.get_rank()!=0)):
+                    batch = next(self.dataloader)
+                    critic_log_dict = self.fwdbwd_one_step(batch, train_generator=False)
+                
+                self.critic_optimizer.step()
+                
+                logger.info(f"Critic warmup step {warmup_step + 1}/{self.critic_warmup}, Critic Loss: {critic_log_dict['critic_loss'].mean().item():.4f}, Critic Video Loss: {critic_log_dict['critic_loss_video'].mean().item():.4f}, Critic Audio Loss: {critic_log_dict['critic_loss_audio'].mean().item():.4f}, GradNorm: {critic_log_dict['critic_grad_norm'].mean().item():.4f}") if self.is_main_process else None
+
+                if warmup_step % self.config.gc_interval == 0:
+                    gc.collect()
+                    torch.cuda.empty_cache()
+            
+            logger.info("Critic warmup completed.") if self.is_main_process else None
+
         while True:
             TRAIN_GENERATOR = self.step % self.config.dfake_gen_update_ratio == 0
             LOG_VIDEO = (
@@ -433,12 +504,15 @@ class Trainer: # MODIFIED: Renamed class
             # Train Generator
             if TRAIN_GENERATOR:
                 self.generator_optimizer.zero_grad(set_to_none=True)
-                batch = next(self.dataloader)
-                generator_log_dict = self.fwdbwd_one_step(
-                    batch,
-                    train_generator=True,
-                    log_video=LOG_VIDEO # logging generated video every n log_iter (currently is 1)
-                )
+                for accum_step in tqdm(range(self.gradient_accumulation_steps), total=len(range(self.gradient_accumulation_steps)), desc="Gradient accumulating for generator", leave=False, disable=(dist.get_rank()!=0)):
+                    batch = next(self.dataloader)
+                    log_video_this_step = LOG_VIDEO and (accum_step == self.gradient_accumulation_steps - 1)
+                    generator_log_dict = self.fwdbwd_one_step(
+                        batch,
+                        train_generator=True,
+                        log_video=log_video_this_step
+                    )
+                
                 if not self.config.debug:
                     self.generator_optimizer.step()
                     if self.generator_ema is not None: 
@@ -446,8 +520,9 @@ class Trainer: # MODIFIED: Renamed class
             
             # Train Critic
             self.critic_optimizer.zero_grad(set_to_none=True)
-            batch = next(self.dataloader)
-            critic_log_dict = self.fwdbwd_one_step(batch, train_generator=False)
+            for accum_step in tqdm(range(self.gradient_accumulation_steps), total=len(range(self.gradient_accumulation_steps)), desc="Gradient accumulating for critic", leave=False, disable=(dist.get_rank()!=0)):
+                batch = next(self.dataloader)
+                critic_log_dict = self.fwdbwd_one_step(batch, train_generator=False)
             if not self.config.debug:
                 self.critic_optimizer.step()
                 

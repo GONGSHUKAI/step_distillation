@@ -12,3 +12,8 @@ model_kwargs:
   video_config_path: "ovi/configs/model/dit/video.json"
   audio_config_path: "ovi/configs/model/dit/audio.json"
   timestep_shift: 5.0
+  # local_attn_size=12 frames mean 3 blocks
+  # for video, local_attn_size will be 12*880=10560
+  # for audio, local_attn_size will be 12
+  # sink_size: 1
+  # local_attn_size: 12 

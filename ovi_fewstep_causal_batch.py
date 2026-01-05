@@ -165,7 +165,7 @@ def main():
         if merge_audio_video(temp_v, temp_a, final_p):
             os.remove(temp_v)
             os.remove(temp_a)
-            logger.info(f"Final video merged: {final_p}")
+            logger.info(f"\nFinal video merged: {final_p}")
 
 if __name__ == "__main__":
     main()

@@ -17,7 +17,7 @@ from ovi.modules.mmaudio.features_utils import FeaturesUtils
 from ovi.modules.tokenizers import HuggingfaceTokenizer
 
 from utils.scheduler import SchedulerInterface, FlowMatchScheduler
-# from utils.sde_util import sde_step_with_logprob
+from utils.sde_util import sde_step_with_logprob
 from utils.dataset import masks_like
 from safetensors.torch import load_file
 import math
@@ -223,6 +223,18 @@ class OviFusionWrapper(torch.nn.Module):
         with open(audio_config_path) as f:
             self.audio_config = json.load(f)
 
+        # NOTE: from shukai. token_per_frame for video is 880, token_per_frame for audio is 1
+        # sink_size and local_attn_size is set from the perspective of video, e.g. sink_size=1 means ref frame is sink, local_attn_size=12 means KV Cache maintains at most 12 video frames (3 blocks)
+        # so sink_size for audio should be 160/32 * sink_size, local_attn_size for audio should be 160/32 * local_attn_size
+        # e.g. if sink_size=1, local_attn_size=12, then audio sink_size=5, audio local_attn_size=60
+        if kwargs.get("sink_size", None) is not None:
+            self.video_config["sink_size"] = kwargs["sink_size"]
+            self.audio_config["sink_size"] = kwargs["sink_size"] * 5
+
+        if kwargs.get("local_attn_size", None) is not None:
+            self.video_config["local_attn_size"] = kwargs["local_attn_size"]
+            self.audio_config["local_attn_size"] = kwargs["local_attn_size"] * 5
+
         if is_causal:
             logger.info(f"Initializing CausalFusionModel: {self.video_config['num_layers']} video blocks and {self.audio_config['num_layers']} audio blocks...") if self.is_main_process else None
             self.model = CausalFusionModel(self.video_config, self.audio_config).to(dtype=torch.bfloat16, device=torch.device('cpu'))
@@ -238,12 +250,12 @@ class OviFusionWrapper(torch.nn.Module):
             else:
                 original_state_dict = load_file(model_path, device='cpu')
         else:
-            model_path = f"/cpfs01/gongshukai/weights/Ovi/{self.model_name}/model_960x960.safetensors"
+            model_path = f"/cpfs01/gongshukai/weights/Ovi/{self.model_name}/model.safetensors"
             logger.info(f"Ovi FusionModel initialized, loading model weights from {model_path}...") if self.is_main_process else None
             original_state_dict = load_file(model_path, device='cpu')
         remapped_state_dict = remap_ovi_state_dict_for_refactored(original_state_dict)
 
-        missing_keys, unexpected_keys = self.model.load_state_dict(remapped_state_dict, strict=False)
+        missing_keys, unexpected_keys = self.model.load_state_dict(remapped_state_dict, strict=True)
         if missing_keys: 
             logger.warning(f"Ovi weights loading: Missing keys: {missing_keys}")
         if unexpected_keys: 

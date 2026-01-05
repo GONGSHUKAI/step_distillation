@@ -69,16 +69,19 @@ beta1: 0.0
 beta2: 0.999
 beta1_critic: 0.0
 beta2_critic: 0.999
-batch_size: 2
+batch_size: 2 # changing to batch size 1, since the thing is quite large
 ema_weight: 0.99
 ema_start_step: 200
-total_batch_size: 64
+gradient_accumulation_steps: 4
+critic_warmup: 10
+eval_csv: /cpfs01/gongshukai/step_distillation/examples/ode_example.csv
+
 
 # checkpointing
-log_iters: 3000
+log_iters: 500
 checkpoints_to_keep: [6000, ]
 num_keep_checkpoints: 2
-video_log_iters: 300
+video_log_iters: 100
 
 ## Dataset settings
 data_path: data/ovi_dataset_part2.csv

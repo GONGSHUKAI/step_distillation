@@ -1,21 +1,23 @@
 ## Step2: Examine ODE checkpoint
-python inference.py \
-    --config_path configs/wan_causal_ode.yaml \
-    --output_folder outputs/ode_init_samples \
-    --checkpoint_path /cpfs01/gongshukai/step_distillation/logs/wan_ode_init/checkpoint_model_004000/model.pt \
-    --data_path /cpfs01/gongshukai/Reward-Forcing/prompts/MovieGenVideoBench_extended.txt
-    
-python inference.py \
-    --config_path configs/wan_causal_ode.yaml \
-    --output_folder outputs/ode_init_samples \
-    --checkpoint_path /cpfs01/gongshukai/weights/self-forcing-ode-init/ode_init.pt \
-    --data_path /cpfs01/gongshukai/Reward-Forcing/prompts/MovieGenVideoBench_extended.txt
-    
-## Step3: Examine Self-forcing checkpoint
+export CUDA_VISIBLE_DEVICES=0
 
-python inference.py \
-    --config_path configs/inference/self_forcing_wan21.yaml \
-    --output_folder outputs/self_forcing_dmd \
-    --checkpoint_path /cpfs01/gongshukai/step_distillation/logs/self_forcing_dmd/checkpoint_model_004000/model.pt \
-    --data_path prompts/MovieGenVideoBench_extended.txt \
-    --use_ema
+python ovi_fewstep_causal_batch.py \
+    --config_path configs/inference/self_forcing_ovi.yaml \
+    --checkpoint_path /cpfs01/gongshukai/step_distillation/logs/ovi_original.pt \
+    --csv_path examples/ode_example.csv \
+    --output_dir outputs/ovi_causal_orig \
+    --debug_visual
+
+# python ovi_fewstep_causal_batch.py \
+#     --config_path configs/inference/self_forcing_ovi.yaml \
+#     --checkpoint_path /root/weights/ovi_ode_init/checkpoint_model_019000/model.pt \
+#     --csv_path examples/ode_example.csv \
+#     --output_dir outputs/ovi_causal \
+#     --debug_visual
+
+# python ovi_fewstep_causal_batch.py \
+#     --config_path configs/inference/self_forcing_ovi.yaml \
+#     --checkpoint_path /cpfs01/gongshukai/step_distillation/logs/distill_ovi_lr_2e-6_lr_critic_4e-7_weighted_loss_smallcfg_720ckpt_15k_data/checkpoint_model_012000/model.pt \
+#     --csv_path examples/ode_example.csv \
+#     --output_dir outputs/ovi_causal_4step \
+#     --debug_visual

@@ -15,7 +15,7 @@ from wan22.modules.model import Wan22Model
 from wan22.modules.vae2_2 import _video_vae as _video_vae_2_2
 
 class WanTextEncoder(torch.nn.Module):
-    def __init__(self, model_name="Wan2.1-T2V-14B") -> None:
+    def __init__(self, model_name="Wan2.1-T2V-1.3B") -> None:
         super().__init__()
         self.model_name = model_name
 
@@ -80,7 +80,7 @@ class WanCLIPEncoder(torch.nn.Module):
 
 
 class WanVAEWrapper(torch.nn.Module):
-    def __init__(self, model_name="Wan2.1-T2V-14B"):
+    def __init__(self, model_name="Wan2.1-T2V-1.3B"):
         super().__init__()
         self.model_name = model_name
         mean = [

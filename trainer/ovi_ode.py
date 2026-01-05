@@ -8,16 +8,24 @@ from collections import defaultdict
 from utils.misc import set_seed, merge_dict_list
 from utils.ovi_wrapper import remap_ovi_state_dict_for_refactored
 import torch.distributed as dist
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from omegaconf import OmegaConf
 import torch
 import wandb
 import time
 import os
-
-from utils.distributed import barrier, fsdp_wrap, fsdp_state_dict, launch_distributed_job
+from tqdm import tqdm
+from utils.distributed import barrier, fsdp_wrap, fsdp_state_dict, launch_distributed_job, fsdp_optim_state_dict
 from ovi.modules.causal_ovi import CausalFusionAttentionBlock # For FSDP wrapping
 
 logger = logging.getLogger(__name__)
+
+# Helper function to extract step from checkpoint folder name
+def extract_step(folder_name):
+    import re
+    match = re.search(r"checkpoint_model_(\d+)", folder_name)
+    return int(match.group(1)) if match else -1
+
 
 class Trainer:
     def __init__(self, config):
@@ -38,6 +46,11 @@ class Trainer:
         self.device = torch.cuda.current_device()
         self.disable_wandb = config.disable_wandb
         logger.info(f"Using wandb: {not self.disable_wandb}") if self.is_main_process else None
+
+        # === NEW: Gradient Accumulation Setup ===
+        self.gradient_accumulation_steps = getattr(config, "gradient_accumulation_steps", 1)
+        if self.gradient_accumulation_steps > 1 and self.is_main_process:
+            logger.info(f"Using gradient accumulation with {self.gradient_accumulation_steps} steps.")
 
         if config.seed == 0:
             random_seed = torch.randint(0, 10000000, (1,), device=self.device)
@@ -65,16 +78,15 @@ class Trainer:
         self.model = OviODERegression(config, device=self.device)
         logger.info(f"Finished initializing the distillation model.") if self.is_main_process else None
         
+        # Load checkpoint (model weights only, optimizer will be loaded after FSDP wrapping)
         pretrained_ckpt_path, self.step = self.load(self.output_path)
+        state_dict = None
         if pretrained_ckpt_path is not None:
             logger.info(f"Loading checkpoint from {pretrained_ckpt_path} at step {self.step}") if self.is_main_process else None
             state_dict = torch.load(pretrained_ckpt_path, map_location="cpu")
+            logger.info(f"Loaded: {state_dict.keys()=} on {dist.get_rank()}")
             self.model.generator.load_state_dict(state_dict["generator"], strict=True)
             logger.info(f"Checkpoint at step {self.step} loaded") if self.is_main_process else None
-            # Free memory
-            del state_dict  
-            gc.collect()
-            torch.cuda.empty_cache()
         else:
             logger.info("No checkpoint found, training from scratch.") if self.is_main_process else None
 
@@ -117,6 +129,26 @@ class Trainer:
         )
         logger.info("Finished setting up optimizers.") if self.is_main_process else None
 
+        # Load optimizer state if resuming (must be done AFTER FSDP wrapping and optimizer creation)
+        if pretrained_ckpt_path is not None and state_dict is not None:
+            if state_dict.get("generator_optimizer", None) is not None:
+                logger.info("Loading generator optimizer state from checkpoint") if self.is_main_process else None
+                self.generator_optimizer.load_state_dict(
+                    FSDP.optim_state_dict_to_load(
+                        self.model.generator,
+                        self.generator_optimizer,
+                        state_dict["generator_optimizer"]
+                    )
+                )
+                logger.info("Generator optimizer state loaded") if self.is_main_process else None
+            else:
+                logger.info("No generator_optimizer found in checkpoint, starting with fresh optimizer state") if self.is_main_process else None
+        
+        # Free memory after loading
+        del state_dict
+        gc.collect()
+        torch.cuda.empty_cache()
+
         # --- Step 3: Dataset ---
         logger.info(f"Setting up dataset and dataloader...") if self.is_main_process else None
         dataset = OviODERegressionDataset(config.data_path)
@@ -138,33 +170,70 @@ class Trainer:
         if not ckpt_folders: 
             return None, 0
         
-        def extract_step(folder_name):
-            import re
-            match = re.search(r"checkpoint_model_(\d+)", folder_name)
-            return int(match.group(1)) if match else -1
         latest_ckpt_folder = sorted(ckpt_folders, key=extract_step)[-1]
         
-        # 2. read model.pt and step
-        model_path = os.path.join(out_path, latest_ckpt_folder, "model.pt")
+        # 2. Read checkpoint.pt and step (changed from model.pt to checkpoint.pt for consistency)
+        # Try checkpoint.pt first, fallback to model.pt for backward compatibility
+        model_path = os.path.join(out_path, latest_ckpt_folder, "checkpoint.pt")
+        if not os.path.exists(model_path):
+            model_path = os.path.join(out_path, latest_ckpt_folder, "model.pt")
+        
         step = extract_step(latest_ckpt_folder)
         if not os.path.exists(model_path):
-            raise FileNotFoundError(f"{model_path} not found")
+            raise FileNotFoundError(f"Neither checkpoint.pt nor model.pt found in {os.path.join(out_path, latest_ckpt_folder)}")
         return model_path, step
     
     def save(self):
+        os.makedirs(self.output_path, exist_ok=True)
+        
+        # Optional: Clean up old checkpoints (similar to ovi_distillation.py)
+        checkpoint_folders = os.listdir(self.output_path)
+        checkpoint_infos = [
+            (checkpoint_folder, extract_step(checkpoint_folder))
+            for checkpoint_folder in checkpoint_folders if checkpoint_folder.startswith("checkpoint_model_")
+        ]
+        # Sort by step number
+        checkpoint_infos = sorted(checkpoint_infos, key=lambda x: x[1], reverse=True)
+        # Filter out checkpoints to keep
+        checkpoint_infos = [info for info in checkpoint_infos if info[1] not in self.config.get("checkpoints_to_keep", [])]
+
+        # NOTE: maybe ensure safer deletion since we are all using root
+        # if (
+        #     (len(checkpoint_infos) >= self.config.get("num_keep_checkpoints", float("inf"))) # since we are also going to save one, we remove one when reaching the number
+        #     and (dist.get_rank() == 0)
+        # ): # a very large number, lol
+        #     # remove the oldest info
+        #     os.removedirs(os.path.join(self.output_path, checkpoint_infos[-1][0]))
+
         logger.info("Start gathering distributed model states...") if self.is_main_process else None
-        state_dict = {"generator": fsdp_state_dict(self.model.generator)}
+        
+        # Gather generator state dict
+        generator_state_dict = fsdp_state_dict(self.model.generator)
+        
+        # Prepare complete state dictionary
+        state_dict = {
+            "generator": generator_state_dict,
+            "generator_optimizer": fsdp_optim_state_dict(
+                self.model.generator,
+                self.generator_optimizer
+            ),
+            "step": self.step,
+        }
         
         if self.is_main_process:
-            os.makedirs(os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}"), exist_ok=True)
-            torch.save(state_dict, os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}", "model.pt"))
-            logger.info(f"Model saved to {os.path.join(self.output_path, f'checkpoint_model_{self.step:06d}', 'model.pt')}")
+            # Create checkpoint directory
+            checkpoint_dir = os.path.join(self.output_path, f"checkpoint_model_{self.step:06d}")
+            os.makedirs(checkpoint_dir, exist_ok=True)
+            logger.info("Finished gathering distributed model states.")
+            
+            # Save model and optimizer states (using checkpoint.pt for consistency)
+            model_path = os.path.join(checkpoint_dir, "checkpoint.pt")
+            torch.save(state_dict, model_path)
+            logger.info(f"Model and optimizer saved to {model_path}")
 
-
-    def train_one_step(self):
-        self.model.eval() # Ovi is trained in Eval mode (no dropout)
-        
-        batch = next(self.dataloader)
+    def fwdbwd_one_step(self, batch):
+        """Forward and backward for one step (no optimizer step)."""
+        self.model.eval()  # Ovi is trained in Eval mode (no dropout)
         
         # [B, 5, 32, 48, H, W]
         video_ode_latent = batch["video_ode_latent"].to(self.device, self.dtype)
@@ -182,30 +251,43 @@ class Trainer:
             conditional_dict=conditional_dict
         )
         
-        # Optimization
-        self.generator_optimizer.zero_grad()
-        loss.backward()
-        grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm)
-        self.generator_optimizer.step()
+        if self.gradient_accumulation_steps > 1:
+            loss = loss / self.gradient_accumulation_steps
         
-        # Logging
-        if self.is_main_process:
-            wandb_log = {
-                "loss": loss.item(),
-                "grad_norm": grad_norm.item(),
-                "video_loss": log_dict["loss_video"].item(),
-                "audio_loss": log_dict["loss_audio"].item()
-            }
-            if not self.config.disable_wandb:
-                wandb.log(wandb_log, step=self.step)
-            
-            logger.info(f"Step {self.step}: ODE Loss={loss.item():.4f}, Video ODE Loss={wandb_log['video_loss']:.4f}, Audio ODE Loss={wandb_log['audio_loss']:.4f}, Grad Norm={wandb_log['grad_norm']}")
+        loss.backward()
+        
+        log_dict.update({
+            "loss": loss * self.gradient_accumulation_steps,  # Log unscaled loss
+        })
+        return log_dict
 
     def train(self):
         start_step = self.step
         while True:
-            self.train_one_step()
+            self.generator_optimizer.zero_grad(set_to_none=True)
+            
+            for accum_step in tqdm(range(self.gradient_accumulation_steps), total=len(range(self.gradient_accumulation_steps)), desc="Gradient accumulating for ODE pretraining", leave=False, disable=(dist.get_rank()!=0)):
+                batch = next(self.dataloader)
+                log_dict = self.fwdbwd_one_step(batch)
+            
+            # Optimizer step after accumulation
+            grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm)
+            self.generator_optimizer.step()
+            
             self.step += 1
+
+            # Logging (use the last step's log_dict)
+            if self.is_main_process:
+                wandb_log = {
+                    "loss": log_dict["loss"].item(),
+                    "grad_norm": grad_norm.item(),
+                    "video_loss": log_dict["loss_video"].item(),
+                    "audio_loss": log_dict["loss_audio"].item()
+                }
+                if not self.config.disable_wandb:
+                    wandb.log(wandb_log, step=self.step)
+                
+                logger.info(f"Step {self.step}: ODE Loss={wandb_log['loss']:.4f}, Video ODE Loss={wandb_log['video_loss']:.4f}, Audio ODE Loss={wandb_log['audio_loss']:.4f}, Grad Norm={wandb_log['grad_norm']:.4f}")
 
             if self.step > 0 and self.step % self.config.log_iters == 0:
                 self.save()
