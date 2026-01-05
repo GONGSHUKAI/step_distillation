@@ -644,6 +644,52 @@ def masks_like(tensor, zero=False, generator=None, p=0.2):
 
     return out1, out2
 
+def process_visual(file_path: str, w: int = 1280, h: int = 704) -> torch.Tensor:    
+    path = Path(file_path)
+    ext = path.suffix.lower()
+    
+    if ext in {'.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tiff'}:
+        try:
+            img = Image.open(file_path).convert("RGB")
+            pixel_values = TF.to_tensor(img)  # [3, H, W], [0, 1]
+        except Exception as e:
+            raise RuntimeError(f"Failed to load image {file_path}: {e}")
+    else:
+        try:
+            import decord
+            video_reader = decord.VideoReader(uri=path.as_posix(), num_threads=1)
+            frame = video_reader[0].asnumpy()  # [H, W, C]
+            pixel_values = torch.from_numpy(frame).permute(2, 0, 1).float() / 255.0  # [3, H, W], [0, 1]
+        except Exception as e:
+            raise RuntimeError(f"Failed to load video first frame {file_path}: {e}")
+
+    C, H_orig, W_orig = pixel_values.shape
+    target_aspect = w / h
+    orig_aspect = W_orig / H_orig
+
+    if orig_aspect > target_aspect:
+        crop_h = H_orig
+        crop_w = int(H_orig * target_aspect)
+        start_h = 0
+        start_w = (W_orig - crop_w) // 2
+    else:
+        crop_w = W_orig
+        crop_h = int(W_orig / target_aspect)
+        start_w = 0
+        start_h = (H_orig - crop_h) // 2
+    
+    pixel_values = pixel_values[:, start_h : start_h + crop_h, start_w : start_w + crop_w]
+    pixel_values = F.interpolate(
+        pixel_values.unsqueeze(0), 
+        size=(h, w), 
+        mode='bilinear', 
+        align_corners=False, 
+        antialias=True
+    )
+    
+    pixel_values = (pixel_values - 0.5) * 2.0
+    return pixel_values.contiguous()
+
 if __name__ == '__main__':
     # CSV_PATH = "/cpfs01/gongshukai/step_distillation/data/ovi_dataset.csv"
     # NUM_FRAMES = 121  # Use a number of frames that matches your CSV, e.g., 63

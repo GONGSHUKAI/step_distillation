@@ -634,7 +634,7 @@ if __name__ == "__main__":
 
     video_config_path = "/cpfs01/gongshukai/step_distillation/ovi/configs/model/dit/video.json"
     audio_config_path = "/cpfs01/gongshukai/step_distillation/ovi/configs/model/dit/audio.json"
-    ckpt_path = "/cpfs01/gongshukai/step_distillation/logs/legacy/OviDMD/model_ema.pt"
+    ckpt_path = "/cpfs01/gongshukai/step_distillation/logs/ovi_self_forcing_4000step.pt"
 
     def load_config(path):
         if os.path.exists(path):

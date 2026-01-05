@@ -11,13 +11,14 @@ import os
 from omegaconf import OmegaConf
 import csv
 from PIL import Image
+import torchvision.transforms as T
 import numpy as np
 import tempfile
 from tqdm import tqdm
 
 # --- OVI IMPORTS ---
 from model.ovi_dmd import OviDMD
-from utils.dataset import OviCSVDataset, OviCSVImageVideoDataset, cycle, OffsetDistributedSampler, masks_like
+from utils.dataset import OviCSVDataset, OviCSVImageVideoDataset, cycle, OffsetDistributedSampler, masks_like, process_visual
 from utils.distributed import EMA_FSDP, fsdp_wrap, fsdp_state_dict, launch_distributed_job, fsdp_optim_state_dict
 from utils.misc import set_seed, merge_dict_list
 from ovi.modules.ovi import FusionAttentionBlock
@@ -294,22 +295,6 @@ class Trainer: # MODIFIED: Renamed class
         if dist.is_initialized():
             dist.barrier()
 
-    def _load_eval_csv(self, csv_path):
-        eval_data = []
-        with open(csv_path, 'r') as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if len(row) >= 2:
-                    prompt = row[0]
-                    image_path = row[1] if len(row) > 1 else None
-                    seed = int(row[2]) if len(row) > 2 else 42
-                    eval_data.append({
-                        "prompt": prompt,
-                        "image_path": image_path,
-                        "seed": seed
-                    })
-        return eval_data
-
     def load(self, out_path):
         # 1. Find latest checkpoint folder (ranked by step)
         if not os.path.exists(out_path): 
@@ -468,6 +453,107 @@ class Trainer: # MODIFIED: Renamed class
             "critic_grad_norm": critic_grad_norm}
         )
         return critic_log_dict
+    
+    def _load_eval_csv(self, csv_path: str, max_len=5):
+        eval_data = []
+        if not os.path.exists(csv_path): return eval_data
+        with open(csv_path, 'r') as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            for row in reader:
+                if len(row) >= 2:
+                    eval_data.append({
+                        "prompt": row[0],
+                        "image_path": row[1],
+                        "seed": int(row[2]) if len(row) > 2 else 0  # default seed is 0
+                    })
+        eval_data = eval_data[:max_len] if len(eval_data) > max_len else eval_data
+        return eval_data
+
+    @torch.no_grad()
+    def run_eval(self) -> dict:
+        eval_csv_path = getattr(self.config, "eval_csv", None)
+        if eval_csv_path is None or not os.path.exists(eval_csv_path):
+            if self.is_main_process:
+                logger.warning(f"Eval CSV not found: {eval_csv_path}")
+            return {}
+        
+        eval_data = self._load_eval_csv(eval_csv_path)
+        if len(eval_data) == 0:
+            if self.is_main_process:
+                logger.warning("Eval CSV is empty")
+            return {}
+        
+        eval_videos = []
+        
+        for idx, sample in tqdm(enumerate(eval_data), total=len(eval_data), leave=False, disable=(dist.get_rank()!=0), desc=f"Running Full Inference Eval"):
+            prompt = sample["prompt"]
+            image_path = sample["image_path"]
+            # set_seed(sample["seed"])
+            
+            # Check if image exists (all ranks need to agree on whether to skip)
+            image_exists = image_path and os.path.exists(image_path)
+            if image_exists:
+                # === All ranks execute inference ===
+                # logger.info(f"Running eval on sample {idx + 1}/{len(eval_data)}: {prompt[:50]}...") if self.is_main_process else None
+                # 1. Encode first frame
+                processed_frame = process_visual(image_path, w=1280, h=704)
+                processed_frame = processed_frame.to(self.device, dtype=self.dtype)
+                wan22_image_latent = self.model.vae.encode_video(processed_frame.unsqueeze(2))
+                
+                # 2. Encode text
+                conditional_dict = self.model.text_encoder(text_prompts=[prompt])
+                conditional_dict = {
+                    "video_prompt_embeds": conditional_dict["prompt_embeds"].detach(),
+                    "audio_prompt_embeds": conditional_dict["prompt_embeds"].detach(),
+                }
+                
+                # 3. Generate noise and run inference
+                video_latent_shape = self.config.video_latent_shape
+                audio_latent_shape = self.config.audio_latent_shape
+                noise_video = torch.randn(1, *video_latent_shape, device=self.device, dtype=self.dtype)
+                noise_audio = torch.randn(1, *audio_latent_shape, device=self.device, dtype=self.dtype)
+                noises = (noise_video, noise_audio)
+                
+                video_latent, audio_latent = self.model.full_inference(
+                    noises=noises,
+                    wan22_image_latent=wan22_image_latent,
+                    **conditional_dict
+                )
+                
+                # 4. Decode video and audio
+                video = self.model.vae.decode_video(video_latent)
+                audio = self.model.vae.decode_audio(audio_latent.transpose(1, 2))
+            
+                # === Only rank 0 saves results ===
+                if self.is_main_process:
+                    video = ((video + 1) / 2 * 255).clip(0, 255)
+                    video_np = video.squeeze(0).permute(1, 0, 2, 3).cpu().float().numpy().astype(np.uint8)
+                    audio_np = audio.squeeze(0).cpu().float().numpy().flatten()
+                    
+                    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+                        save_video(f.name, video_np, audio_np)
+                        eval_videos.append({"path": f.name, "prompt": prompt[:50], "idx": idx})
+                
+                # All ranks clean up
+                torch.cuda.empty_cache()
+            
+            else:
+                # Image not found - all ranks skip but still sync
+                logger.warning(f"Image not found: {image_path}, skipping sample {idx}") if self.is_main_process else None
+            
+            # Sync all ranks after each sample
+            if dist.is_initialized():
+                dist.barrier()
+        
+        # === Only rank 0 prepares wandb log ===
+        wandb_log = {}
+        if self.is_main_process:
+            for item in eval_videos:
+                key = f"Evaluation/Sample_{item['idx']}"
+                wandb_log[key] = wandb.Video(item["path"], format="mp4")
+        
+        return wandb_log
 
     def train(self):
         # --- MODIFIED FOR OVI LOGGING ---
@@ -543,6 +629,14 @@ class Trainer: # MODIFIED: Renamed class
                 torch.cuda.empty_cache()
 
             # Logging
+            eval_log = {}
+            if TRAIN_GENERATOR and LOG_VIDEO:
+                logger.info(f"Step {self.step}: Running on-the-fly evaluation...") if self.is_main_process else None
+                try:
+                    eval_log = self.run_eval()
+                except Exception as e:
+                    logger.warning(f"Error during eval: {e}") if self.is_main_process else None
+
             if self.is_main_process:
                 wandb_log = {}
                 if TRAIN_GENERATOR:
@@ -558,6 +652,7 @@ class Trainer: # MODIFIED: Renamed class
                         wandb_log.update({
                             "Visualization/Generated_Video_Audio": wandb.Video(generator_log_dict['generated_video_audio'], format="mp4"),
                         })
+                        wandb_log.update(eval_log)
                     logger.info(f"Step {self.step}: Generator Loss: {generator_log_dict['generator_loss'].mean().item():.4f}, Video DMD Loss: {generator_log_dict['dmd_loss_video'].mean().item():.4f}, Audio DMD Loss: {generator_log_dict['dmd_loss_audio'].mean().item():.4f}, GradNorm: {generator_log_dict['generator_grad_norm'].mean().item():.4f}, DMD Video GradNorm: {generator_log_dict['dmdtrain_gradient_norm_video'].mean().item():.4f}, DMD Audio GradNorm: {generator_log_dict['dmdtrain_gradient_norm_audio'].mean().item():.4f}")
                 
                 wandb_log.update({
