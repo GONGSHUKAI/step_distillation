@@ -360,8 +360,11 @@ class Trainer:
     def train(self):
         start_step = self.step
         while True:
-            LOG_VIDEO = self.step % self.video_log_iter == 0
-            self.generator_optimizer.zero_grad(set_to_none=True)
+            if self.video_log_iter == 0:
+                LOG_VIDEO = False
+            else:
+                LOG_VIDEO = self.step % self.video_log_iter == 0
+            self.generator_optimizer.zero_grad()
             
             for accum_step in tqdm(range(self.gradient_accumulation_steps), total=len(range(self.gradient_accumulation_steps)), desc="Gradient accumulating for ODE pretraining", leave=False, disable=(dist.get_rank()!=0)):
                 batch = next(self.dataloader)

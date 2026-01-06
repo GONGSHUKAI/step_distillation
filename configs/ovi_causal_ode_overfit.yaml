@@ -7,7 +7,7 @@ sharding_strategy: hybrid_full
 wandb_host: https://api.wandb.ai
 wandb_key: afa4e78959b05201e369f448504697737237fc5c
 wandb_entity: shukai_gong-renmin-university-of-china
-wandb_project: ode_pretrain_overfit
+wandb_project: ode_pretrain
 # wandb_name: ovi_causal_ode_pretrain
 
 ## Model settings
@@ -33,11 +33,11 @@ audio_latent_shape: [160, 20]
 
 ## Training settings
 gradient_checkpointing: true
-mixed_precision: true  # 使用 bf16
+mixed_precision: true
 warp_denoising_step: true
 batch_size: 4
 max_pair: 10000000
-lr: 2.0e-06
+lr: 1.0e-5
 beta1: 0.9
 beta2: 0.999
 weight_decay: 0.01
@@ -45,10 +45,11 @@ gradient_accumulation_steps: 1
 eval_csv: /cpfs01/gongshukai/step_distillation/examples/ode_example.csv
 
 ## checkpointing
-log_iters: 1000
+log_iters: 1500
 checkpoints_to_keep: [5000, ]
 num_keep_checkpoints: 2
-video_log_iters: 100
+video_log_iters: 300
 
 ## Dataset settings
 data_path: /cpfs01/gongshukai/step_distillation/data/ode_pairs_overfit   # ls /cpfs01/gongshukai/step_distillation/data/ode_pairs_1219 | wc -l
+# data_path: /cpfs01/gongshukai/step_distillation/data/ode_pairs_1219
