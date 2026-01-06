@@ -198,7 +198,7 @@ class SelfForcingTrainingPipeline:
                     device=noise.device,
                     dtype=torch.int64) * current_timestep
 
-                if not exit_flag:   # 如果还没到最后一步，不带着梯度去噪
+                if not exit_flag:   # 如果还没到最后一步，不带着梯度去噪 # NOTE: ermu2001: it's not the "last step", but the step that was not selected for gradient computation in random sampling the loss configuration 
                     with torch.no_grad():
                         _, denoised_pred = self.generator(
                             noisy_image_or_video=noisy_input,
@@ -217,6 +217,20 @@ class SelfForcingTrainingPipeline:
                         ).unflatten(0, denoised_pred.shape[:2])
                 else:   
                     # 如果到了最后一步，
+                    # start_gradient_frame_index: 计算从哪一帧开始需要保留梯度。这个逻辑是为了支持长视频训练（Long Video Training）或者节省显存。
+                    # 假设我们要训练模型生成 100 帧的视频，但 Teacher 模型（Wan2.1）一次只能看 21 帧。
+                    # 如果我们对这 100 帧的全过程都保留梯度，显存会爆炸，而且 Teacher 也指导不了这么长。
+                    # 所以，我们让 Student 先“跑”前面的帧（比如前 79 帧），这部分纯粹是为了构建历史 Context（填充 KV Cache）。
+                    # 对于这部分前向计算，我们开启 torch.no_grad()，不构建计算图，不存中间激活值，极大地节省显存。
+                    # 当生成到最后 21 帧（current_start_frame >= start_gradient_frame_index）时，我们才开启梯度计算。
+                    # 最终 Loss 只算这最后 21 帧的 Loss。
+
+                    # Self-forcing 默认场景（生成 21 帧）：
+                    # 如果 num_output_frames 就是 21。
+                    # start_gradient_frame_index = 21 - 21 = 0。
+                    # 这意味着 current_start_frame (从 0 开始) 总是 >= 0。
+                    # 结果：对于标准的 21 帧生成任务，if 条件永远为假，所有 Block 都会走进 else 分支（保留梯度）。
+                    
                     # for getting real output
                     # with torch.set_grad_enabled(current_start_frame >= start_gradient_frame_index):
                     if current_start_frame < start_gradient_frame_index:
@@ -245,7 +259,7 @@ class SelfForcingTrainingPipeline:
                             crossattn_cache=self.crossattn_cache,
                             current_start=current_start_frame * self.frame_seq_length
                         )
-                    break
+                    break # NOTE: ermu2001: then this is a bit wierd since sampled exit flag not necessary is the "last step"
 
             # 3.2 记录当前 Block 最终生成的 latent
             output[:, current_start_frame:current_start_frame + current_num_frames] = denoised_pred
@@ -309,8 +323,8 @@ class SelfForcingTrainingPipeline:
         for _ in range(self.num_transformer_blocks):
             # 模型有 30 层 Transformer Block，所以创建一个长度为 30 的列表 kv_cache1。
             # 列表中的每个元素（每层）是一个字典，包含：
-            # "k": 形状 [1, 32760, 12, 128] (全零，显存预分配)。
-            # "v": 形状 [1, 32760, 12, 128] (全零)。
+            # "k": 形状 [B, 32760, 12, 128] (全零，显存预分配)。    # seqlen=21*1*60/2*104/2=32760, dim=1536
+            # "v": 形状 [B, 32760, 12, 128] (全零)。
             # "global_end_index": tensor([0]) (指针，指示当前 Cache 写到了哪里)。
             # "local_end_index": tensor([0])。
             kv_cache1.append({

@@ -1,0 +1,19 @@
+model_name: Ovi
+generator_type: "causal"
+denoising_step_list: [1000, 750, 500, 250]
+warp_denoising_step: true
+
+video_h: 704
+video_w: 1280
+video_num_frames: 121
+audio_duration_secs: 5
+audio_sample_rate: 16000
+model_kwargs:
+  video_config_path: "ovi/configs/model/dit/video.json"
+  audio_config_path: "ovi/configs/model/dit/audio.json"
+  timestep_shift: 5.0
+  # local_attn_size=12 frames mean 3 blocks
+  # for video, local_attn_size will be 12*880=10560
+  # for audio, local_attn_size will be 12
+  # sink_size: 1
+  # local_attn_size: 12 

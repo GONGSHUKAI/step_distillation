@@ -203,7 +203,7 @@ def scale_hw_to_area_divisible(h, w, area=1024*1024, n=16):
 
     return new_h, new_w
 
-def validate_and_process_user_prompt(text_prompt: str, image_path: str = None, mode: str = "t2v") -> str:
+def validate_and_process_user_prompt(text_prompt: str, image_path: str = None, mode: str = "t2v", output_dir: str = None) -> str:
     if not isinstance(text_prompt, str):
         raise ValueError("User input must be a string")
 
@@ -223,10 +223,32 @@ def validate_and_process_user_prompt(text_prompt: str, image_path: str = None, m
         else:
             raise ValueError(f"Unsupported file type: {ext}. Only .csv and .tsv are allowed.")
 
-        assert "text_prompt" in df.keys(), f"Missing required columns in TSV file."
-        text_prompts = list(df["text_prompt"])
+        assert (
+            ("text_prompt" in df.keys())
+            or ("text" in df.keys())
+        ), f"Missing required columns in TSV file."
+        if "text_prompt" in df.keys():
+            text_prompts = list(df["text_prompt"])
+        elif "text" in df.keys():
+            text_prompts = list(df["text"])
+        else:
+            raise ValueError("error")
+
         if mode == "i2v" and 'image_path' in df.keys():
             image_paths = list(df["image_path"])
+        elif mode == "i2v" and 'video_path' in df.keys():
+            image_paths = []
+            original_text_prompts = text_prompts
+            text_prompts = []
+            for i, image_path in enumerate(df["video_path"]):
+                IMG_EXTS = [".jpg", ".jpeg", ".png", ".bmp", ".tiff"]
+                ROOT_FRAME_DIR = "/root/ermu2001/CODES/Ovi/tmp/first_frames"
+                if image_path.split(".")[-1] not in IMG_EXTS:
+                    image_path = ROOT_FRAME_DIR + "/" + image_path.split("/")[-1] + ".png"
+                if not os.path.isfile(image_path):
+                    continue
+                image_paths.append(image_path)
+                text_prompts.append(original_text_prompts[i])
             assert all(p is None or len(p) == 0 or os.path.isfile(p) for p in image_paths), "One or more image paths in the TSV file do not exist."
         else:
             print("Warning: image_path was not found, assuming t2v or t2i2v mode...")
@@ -237,6 +259,14 @@ def validate_and_process_user_prompt(text_prompt: str, image_path: str = None, m
         text_prompts = [text_prompt]
         image_paths = [image_path]
 
+    if output_dir and os.path.isdir(output_dir):
+        done = {p for p in os.listdir(output_dir) if p.endswith('.mp4')}
+        keep_idx = [
+            i for i, ip in enumerate(image_paths) if f"{ip.split('/')[-1].split('.')[0]}.mp4" not in done
+        ]
+        text_prompts = [text_prompts[i] for i in keep_idx]
+        image_paths = [image_paths[i] for i in keep_idx]
+        
     return text_prompts, image_paths
 
 
@@ -290,13 +320,16 @@ def audio_path_to_tensor(path, target_sr=16000):
 def clean_text(text: str) -> str:
     """
     Remove all text between <S>...</E> and <AUDCAP>...</ENDAUDCAP> tags,
-    including the tags themselves.
+    as well as any 'Audio: ...' lines. Also trims excess whitespace.
     """
-    # Remove <S> ... <E>
+    # Remove <S> ... <E> dialogue tags
     text = re.sub(r"<S>.*?<E>", "", text, flags=re.DOTALL)
 
-    # Remove <AUDCAP> ... <ENDAUDCAP>
+    # Remove <AUDCAP> ... <ENDAUDCAP> audio caption tags
     text = re.sub(r"<AUDCAP>.*?<ENDAUDCAP>", "", text, flags=re.DOTALL)
 
-    # Strip extra whitespace
+    # Remove 'Audio: ...' lines (including multiline ones)
+    text = re.sub(r"Audio:\s*.*", "", text, flags=re.DOTALL)
+
+    # Strip leading/trailing whitespace
     return text.strip()

@@ -60,7 +60,7 @@ ema_start_step: 200
 total_batch_size: 64
 log_iters: 1000
 video_latent_shape: [1, 31, 48, 44, 80]   # in TI2AV settings, H, W depends on ref image size
-audio_latent_shape: [1, 157, 20]
+audio_latent_shape: [1, 157, 20]  # 5s * 16kHz / 512 = 156.25
 
 ## Dataset settings
 num_frames: 121

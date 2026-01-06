@@ -75,7 +75,11 @@ class ODERegression(BaseModel):
         # index 是一个形状为 [batch_size, num_frames] = [B, 21] 的 Tensor。
         # 它为每一帧随机选择一个从 0 到 3 的索引。
         # 例如，假设 batch_size=2, num_frames=21, num_frame_per_block=3，则index可以是
-        # [[0, 0, 0, 1, 1, 1, 2, 2, 2, ..., 3, 3, 3], [0, 0, 0, 1, 1, 1, 2, 2, 2, ..., 3, 3, 3]]
+        # T2V index: [[0, 0, 0, 1, 1, 1, 2, 2, 2, ..., 3, 3, 3], [0, 0, 0, 1, 1, 1, 2, 2, 2, ..., 3, 3, 3]]
+        # I2V index: [[0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 1 ,1 ,1, 1]]
+        
+        # Ovi I2AV video index[0, 1, 1, 1, 2, 2, 2]
+        # Ovi      audio index[0, 0, 0, 0, 0, 1, 1, ..., 1 (15个1)]
         index = self._get_timestep(
             0,
             len(self.denoising_step_list),
@@ -88,7 +92,7 @@ class ODERegression(BaseModel):
         # index[:, 0] = len(self.denoising_step_list) - 1：这行代码强制将第 0 帧（第一帧）的索引设为最大值（即指向 ODE 轨迹的最后一个元素，也就是 t=0 的干净 Latent）。
         # 意义: 在 I2V 任务中，第一帧是参考图，是已知的、清晰的。所以无论其他帧处于什么噪声水平，第一帧必须始终保持为“干净状态”。这模拟了 I2V 推理时第一帧作为 Condition 的情况。
         if self.args.i2v:
-            index[:, 0] = len(self.denoising_step_list) - 1
+            index[:, 0] = len(self.denoising_step_list) - 1 # [1000, 750, 500, 250, 0]
             # This ensures that the first frame is always the clean latent (t=0).
             # len(self.denoising_step_list) - 1 = 3, so index[:, 0] = 3
 

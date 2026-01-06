@@ -174,6 +174,7 @@ class SelfForcingModel(BaseModel):
         )
         # Slice last 21 frames
         if pred_image_or_video.shape[1] > latent_frames_num:
+            # NOTE, ermu2001: this behavior is very not well designed
             with torch.no_grad():
                 # Reencode to get image latent
                 latent_to_decode = pred_image_or_video[:, :-(latent_frames_num-1), ...]

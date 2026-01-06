@@ -96,13 +96,19 @@ def process_one(pipe: OviFewstepInferencePipeline, prompt, image_path, seed, idx
 
     # --- 生成视频和音频的初始噪声 ---
     generator = torch.Generator(device="cuda").manual_seed(seed)
+    # video_noise = torch.randn(
+    #     (1, (config.video_num_frames - 1) // 4 + 1, 48, target_h // 16, target_w // 16), 
+    #     generator=generator, 
+    #     device="cuda", 
+    #     dtype=torch.bfloat16
+    # )   # (1, lat_F, lat_C, lat_H, lat_W)
     video_noise = torch.randn(
-        (1, (config.video_num_frames - 1) // 4 + 1, 48, target_h // 16, target_w // 16), 
+        (1, 4, 48, target_h // 16, target_w // 16), 
         generator=generator, 
         device="cuda", 
         dtype=torch.bfloat16
     )   # (1, lat_F, lat_C, lat_H, lat_W)
-    audio_latent_len, audio_latent_dim = 157, 20
+    audio_latent_len, audio_latent_dim = 20, 20
     audio_noise = torch.randn(
         (1, audio_latent_len, audio_latent_dim), generator=generator, device="cuda", dtype=torch.bfloat16
     )

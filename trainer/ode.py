@@ -32,7 +32,6 @@ class Trainer:
 
         self.dtype = torch.bfloat16 if config.mixed_precision else torch.float32
         self.device = torch.cuda.current_device()
-        self.is_main_process = global_rank == 0
         self.disable_wandb = config.disable_wandb
         logger.info(f"Using wandb: {not self.disable_wandb}") if self.is_main_process else None
 
@@ -106,12 +105,9 @@ class Trainer:
 
         # Step 3: Initialize the dataloader
         logger.info(f"Setting up dataset and dataloader...") if self.is_main_process else None
-        dataset = ODERegressionLMDBDataset(
-            config.data_path, max_pair=getattr(config, "max_pair", int(1e8)))
-        sampler = torch.utils.data.distributed.DistributedSampler(
-            dataset, shuffle=True, drop_last=True)
-        dataloader = torch.utils.data.DataLoader(
-            dataset, batch_size=config.batch_size, sampler=sampler, num_workers=8)
+        dataset = ODERegressionLMDBDataset(config.data_path, max_pair=getattr(config, "max_pair", int(1e8)))
+        sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=True, drop_last=True)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.batch_size, sampler=sampler, num_workers=8)
         total_batch_size = getattr(config, "total_batch_size", None)
         if total_batch_size is not None:
             assert total_batch_size == config.batch_size * self.world_size, "Gradient accumulation is not supported for ODE training"

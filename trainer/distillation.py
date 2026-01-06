@@ -210,9 +210,15 @@ class Trainer:
                 state_dict = state_dict["generator"]
             elif "model" in state_dict:
                 state_dict = state_dict["model"]
-            self.model.generator.load_state_dict(
-                state_dict, strict=True
-            )
+            
+            clean_state_dict = {}
+            for k, v in state_dict.items():
+                new_k = k.replace("_fsdp_wrapped_module.", "").replace("_checkpoint_wrapped_module.", "").replace("_orig_mod.", "")
+                if not new_k.startswith("model."):
+                    new_k = "model." + new_k
+                clean_state_dict[new_k] = v
+            
+            self.model.generator.load_state_dict(clean_state_dict, strict=True)
 
         ##############################################################################################################
 

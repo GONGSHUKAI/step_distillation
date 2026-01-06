@@ -1,4 +1,4 @@
-# FILE: /videogen/Wan2.2-TI2V-5B-Turbo/ovi/modules/fusion.py
+# FILE: ovi/modules/ovi.py
 # VERSION: Final Optimized FSDP-Native Refactor
 
 import math
@@ -181,9 +181,11 @@ class FusionModel(nn.Module):
         x = [patch_embedding(u.unsqueeze(0)) for u in x]
         
         if is_video:
+            # video: grid_size [31, 44, 80]
             grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
             x = [u.flatten(2).transpose(1, 2) for u in x]
         else:
+            # audio: grid size [157]
             grid_sizes = torch.stack([torch.tensor(u.shape[1:2], dtype=torch.long) for u in x])
 
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
@@ -193,7 +195,7 @@ class FusionModel(nn.Module):
         if t.dim() == 1:
             if first_frame_is_clean:
                 t = torch.ones((t.size(0), seq_len), device=t.device, dtype=t.dtype) * t.unsqueeze(1)
-                _first_images_seq_len = grid_sizes[:, 1:].prod(-1)
+                _first_images_seq_len = grid_sizes[:, 1:].prod(-1)  # 44*80=3520
                 for i in range(t.size(0)): t[i, :_first_images_seq_len[i]] = 0
             else:
                 t = t.unsqueeze(1).expand(t.size(0), seq_len)

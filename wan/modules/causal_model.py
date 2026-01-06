@@ -310,10 +310,13 @@ class CausalWanSelfAttention(nn.Module):
                 kv_cache["k"][:, local_start_index:local_end_index] = roped_key
                 kv_cache["v"][:, local_start_index:local_end_index] = v
             else:
+                # print(f'{current_start=}, {cache_start=}')
+                # print(f'{kv_cache["local_end_index"].item()=}, {current_end=}, {kv_cache["global_end_index"].item()=}')
                 # Assign new keys/values directly up to current_end
                 # 显存足够，直接追加 (Append)
                 local_end_index = kv_cache["local_end_index"].item() + current_end - kv_cache["global_end_index"].item()
                 local_start_index = local_end_index - num_new_tokens
+                # print(f'{local_start_index=}, {local_end_index=}')
                 kv_cache["k"][:, local_start_index:local_end_index] = roped_key
                 kv_cache["v"][:, local_start_index:local_end_index] = v
 
@@ -850,6 +853,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             if local_attn_size == -1:
                 return (kv_idx < ends[q_idx]) | (q_idx == kv_idx)
             else:
+                # problematic? kv_idx < sink_size?
                 return ((kv_idx < ends[q_idx]) & (kv_idx >= (ends[q_idx] - local_attn_size * frame_seqlen))) | \
                     (q_idx == kv_idx)
 

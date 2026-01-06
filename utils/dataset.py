@@ -10,6 +10,7 @@ import os
 import torchvision.transforms.functional as TF
 import pandas as pd
 import cv2
+import glob
 import random
 import math
 from pathlib import Path
@@ -27,7 +28,7 @@ class OffsetDistributedSampler(DistributedSampler):
         else:
             self.initial_step = (
                 (initial_step * gpu_num - len(dataset)) % len(dataset)
-            ) // (gpu_num * gpu_num)
+            ) // (gpu_num * gpu_num) # NOTE: Why does this divide by gpu_num * gpu_num?
         self.first_time = True  # 标志位，表示是否是第一次加载
 
     def __iter__(self):
@@ -117,7 +118,52 @@ class ODERegressionLMDBDataset(Dataset):
             "ode_latent": torch.tensor(latents, dtype=torch.float32)
         }
 
+class OviODERegressionDataset(Dataset):
+    def __init__(self, data_path: str, max_pair: int = int(1e8)):
+        self.data_path = data_path
+        self.files = sorted(glob.glob(os.path.join(data_path, "*.pth")))
+        if len(self.files) == 0:
+            raise ValueError(f"No .pth files found in {data_path}")
+        if len(self.files) > max_pair:
+            self.files = self.files[:max_pair]
 
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, idx):
+        """
+        Outputs Dictionary:
+            - prompts: str
+            - video_ode_latent: [5, 32, 48, 44, 80] (Steps, Frames, Channels, H, W)
+            - audio_ode_latent: [5, 160, 20]        (Steps, Length, Channels)
+        """
+        file_path = self.files[idx]
+        
+        try:
+            data = torch.load(file_path, map_location='cpu')
+            prompts = data.get('text', "")
+            vid = data['video_noisy_inputs'].float()
+            vid = vid.permute(0, 2, 1, 3, 4)
+            last_frame = vid[:, -1:, ...]
+            video_ode_latent = torch.cat([vid, last_frame], dim=1)
+            
+            aud = data['audio_noisy_inputs'].float()
+            pad_len = 160 - aud.shape[1]
+            if pad_len > 0:
+                audio_ode_latent = F.pad(aud, (0, 0, 0, pad_len), mode='constant', value=0)
+            else:
+                audio_ode_latent = aud[:, :160, :]
+
+            return {
+                "prompts": prompts,
+                "video_ode_latent": video_ode_latent,
+                "audio_ode_latent": audio_ode_latent
+            }
+            
+        except Exception as e:
+            print(f"Error loading file {file_path}: {e}")
+            raise e
+    
 class ShardingLMDBDataset(Dataset):
     def __init__(self, data_path: str, max_pair: int = int(1e8)):
         self.envs = []

@@ -69,10 +69,15 @@ if args.checkpoint_path:
     print(f"Loading checkpoint from {args.checkpoint_path}")
     state_dict = torch.load(args.checkpoint_path, map_location="cpu")
     print(f"Checkpoint keys: {list(state_dict.keys())}")
-    state_dict = state_dict['generator' if not args.use_ema else 'generator_ema']
+    if "generator_ema" in state_dict.keys():
+        state_dict = state_dict["generator_ema"]
+    elif "generator" in state_dict.keys():
+        state_dict = state_dict["generator"]
     clean_state_dict = {}
     for k, v in state_dict.items():
         new_k = k.replace("_fsdp_wrapped_module.", "").replace("_checkpoint_wrapped_module.", "").replace("_orig_mod.", "")
+        if not new_k.startswith("model."):
+            new_k = "model." + new_k
         clean_state_dict[new_k] = v
     pipeline.generator.load_state_dict(clean_state_dict)
 pipeline = pipeline.to(device=device, dtype=torch.bfloat16)

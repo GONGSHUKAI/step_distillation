@@ -203,6 +203,7 @@ VBench
 
 utils/ovi_wrapper_exp.py
 data/tmp
+data/ode*
 data/MagicData.csv
 data/preprocess*
 data/matrix_audio_ovi_newformat.csv
@@ -243,3 +244,10 @@ running_scripts/inference/i2av_fewstep_8000step.sh
 running_scripts/inference/i2av_fewstep_9000step.sh
 wan2.2_fewstep_batch.py
 wan2.2_fewstep.py
+
+*.jpg
+*.png
+logs/
+*deprecated*
+*.mp4
+*.ipynb
