@@ -3,7 +3,7 @@
 import gc
 import logging
 from utils.dataset import OviODERegressionDataset, cycle, process_visual
-from model.ovi_ode_regression import OviODERegression # <--- Will define this next
+from model.ovi_sf_regression import OviSelfForcingRegression # <--- Will define this next
 from collections import defaultdict
 from utils.misc import set_seed, merge_dict_list
 from utils.ovi_wrapper import remap_ovi_state_dict_for_refactored
@@ -78,10 +78,10 @@ class Trainer:
         self.output_path = config.logdir
 
         # --- Step 2: Model Init ---
-        logger.info(f"Initializing Ovi ODE Regression Model...") if self.is_main_process else None
+        logger.info(f"Initializing Ovi Self Forcing Regression Model...") if self.is_main_process else None
         assert config.distribution_loss == "ode", "Only ODE loss is supported for ODE training"
-        self.model = OviODERegression(config, device=self.device)
-        logger.info(f"Finished initializing the distillation model.") if self.is_main_process else None
+        self.model = OviSelfForcingRegression(config, device=self.device)
+        logger.info(f"Finished initializing the Self Forcing Regression model.") if self.is_main_process else None
         
         # Load checkpoint (model weights only, optimizer will be loaded after FSDP wrapping)
         pretrained_ckpt_path, self.step = self.load(self.output_path)
@@ -343,7 +343,7 @@ class Trainer:
         return wandb_log
 
 
-    def fwdbwd_one_step(self, batch):
+    def fwdbwd_one_step(self, batch, log_video=False):
         """Forward and backward for one step (no optimizer step)."""
         self.model.eval()  # Ovi is trained in Eval mode (no dropout)
         
@@ -360,7 +360,8 @@ class Trainer:
         loss, log_dict = self.model.generator_loss(
             video_ode_latent=video_ode_latent,
             audio_ode_latent=audio_ode_latent,
-            conditional_dict=conditional_dict
+            conditional_dict=conditional_dict,
+            log_video=log_video
         )
         
         if self.gradient_accumulation_steps > 1:
@@ -384,7 +385,7 @@ class Trainer:
             
             for accum_step in tqdm(range(self.gradient_accumulation_steps), total=len(range(self.gradient_accumulation_steps)), desc="Gradient accumulating for ODE pretraining", leave=False, disable=(dist.get_rank()!=0)):
                 batch = next(self.dataloader)
-                log_dict = self.fwdbwd_one_step(batch)
+                log_dict = self.fwdbwd_one_step(batch, LOG_VIDEO)
             
             # Optimizer step after accumulation
             grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm)
@@ -409,6 +410,11 @@ class Trainer:
                     "video_loss": log_dict["loss_video"].item(),
                     "audio_loss": log_dict["loss_audio"].item()
                 }
+                if LOG_VIDEO: 
+                    wandb_log.update({
+                        "Visualization/Generated_Video_Audio": wandb.Video(log_dict['generated_video_audio'], format="mp4"),
+                        "Visualization/Ground_Truth_Video_Audio": wandb.Video(log_dict['gt_video_audio'], format="mp4"),
+                    })
                 if not self.config.disable_wandb:
                     wandb.log(wandb_log, step=self.step)
                 

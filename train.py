@@ -16,7 +16,9 @@ from trainer import (
     # NOTE: ermu2001: Seems no these?
     # OviScoreDistillationImageVideoRLTrainer,
     # OviScoreDistillationImageVideoRewardTrainer,
-    OviODETrainer
+    OviODETrainer,
+    OviSelfForcingPretrainTrainer,
+    OviSelfForcingPretrainTrainerLRSchedule
 )
 import logging, os
 logging.basicConfig(
@@ -89,6 +91,10 @@ def main():
         trainer = ODETrainer(config)
     elif config.trainer == "ovi_ode":
         trainer = OviODETrainer(config)
+    elif config.trainer == "ovi_sf_pretrain":
+        trainer = OviSelfForcingPretrainTrainer(config)
+    elif config.trainer == "ovi_sf_pretrain_lr_schedule":
+        trainer = OviSelfForcingPretrainTrainerLRSchedule(config)
     elif config.trainer == "score_distillation":
         trainer = ScoreDistillationTrainer(config)
     elif config.trainer == "score_distillation_wan22":

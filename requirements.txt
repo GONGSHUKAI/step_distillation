@@ -50,6 +50,8 @@ pydantic==2.10.6
 scikit-image 
 dominate 
 appdirs
+moviepy==1.0.3
+mediapy==1.2.4
 
 # Then install flash attention
 # flash-attn==2.7.3 --use-pep517 --no-build-isolation

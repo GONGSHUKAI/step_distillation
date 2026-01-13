@@ -112,6 +112,11 @@ class OviODERegression(OviBaseModel):
             first_frame_is_clean=True,
         )
 
+        # # NOTE: 20260107 try not masking t=0 blocks
+        # mask_v = torch.cat((torch.ones([B, 31]), torch.zeros([B, 1])), dim=1).view(B, 32, 1, 1, 1).expand_as(x0_video).bool() 
+        # mask_a = torch.cat((torch.ones([B, 157]), torch.zeros([B, 3])), dim=1).view(B, 160, 1).expand_as(x0_audio).bool()
+
+        # NOTE: original logic: masking t=0 blocks
         mask_pad_v = torch.cat((torch.ones([B, 31]), torch.zeros([B, 1])), dim=1).to(self.device)
         mask_pad_a = torch.cat((torch.ones([B, 157]), torch.zeros([B, 3])), dim=1).to(self.device)
         mask_t_v = (timestep_v != 0)  # [B, 32]
@@ -370,7 +375,7 @@ if __name__ == "__main__":
             self.model_name = "Ovi"
             self.generator_name = "Ovi"
             self.generator_type = "causal"
-            self.generator_path = "/cpfs01/gongshukai/step_distillation/logs/ovi_ode_init/checkpoint_model_005000/model.pt"
+            self.generator_path = "/cpfs01/gongshukai/step_distillation/logs/ovi_ode_init_1229/checkpoint_model_010000/checkpoint.pt"
 
             self.model_kwargs = {
                 "timestep_shift": 5.0
@@ -388,7 +393,7 @@ if __name__ == "__main__":
     dtype = torch.bfloat16 if args.mixed_precision else torch.float32
 
     
-    dataset = OviODERegressionDataset(data_path="/cpfs01/gongshukai/step_distillation/data/ode_pairs_debug")
+    dataset = OviODERegressionDataset(data_path="/cpfs01/gongshukai/step_distillation/data/ode_pairs_overfit")
     sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=True, drop_last=True)
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=2, sampler=sampler, num_workers=4

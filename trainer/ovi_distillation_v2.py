@@ -651,6 +651,8 @@ class Trainer: # MODIFIED: Renamed class
                     if LOG_VIDEO:
                         wandb_log.update({
                             "Visualization/Generated_Video_Audio": wandb.Video(generator_log_dict['generated_video_audio'], format="mp4"),
+                            "Visualization/RealScore_Video_Audio": wandb.Video(generator_log_dict['real_video_audio'], format="mp4"),
+                            "Visualization/FakeScore_Video_Audio": wandb.Video(generator_log_dict['fake_video_audio'], format="mp4"),
                         })
                         wandb_log.update(eval_log)
                     logger.info(f"Step {self.step}: Generator Loss: {generator_log_dict['generator_loss'].mean().item():.4f}, Video DMD Loss: {generator_log_dict['dmd_loss_video'].mean().item():.4f}, Audio DMD Loss: {generator_log_dict['dmd_loss_audio'].mean().item():.4f}, GradNorm: {generator_log_dict['generator_grad_norm'].mean().item():.4f}, DMD Video GradNorm: {generator_log_dict['dmdtrain_gradient_norm_video'].mean().item():.4f}, DMD Audio GradNorm: {generator_log_dict['dmdtrain_gradient_norm_audio'].mean().item():.4f}")
