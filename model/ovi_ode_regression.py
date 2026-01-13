@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from utils.ovi_wrapper import OviFusionWrapper, OviTextEncoder, OviVAEWrapper
 from utils.dataset import OviODERegressionDataset, cycle, masks_like
+from pipeline import OviSelfForcingTrainingPipeline
 import numpy as np
 from model.ovi_base import OviBaseModel
 import logging
@@ -25,6 +26,7 @@ class OviODERegression(OviBaseModel):
         self.num_frame_per_block_aud = 20
         self.num_blocks = 8
         self.num_aud_frame_per_vid = self.num_frame_per_block_aud // self.num_frame_per_block_vid
+        self.inference_pipeline = None
 
     def _initialize_models(self, args, device):
         self.generator_name = getattr(args, "generator_name", "Ovi")    # the student model
@@ -110,6 +112,11 @@ class OviODERegression(OviBaseModel):
             first_frame_is_clean=True,
         )
 
+        # # NOTE: 20260107 try not masking t=0 blocks
+        # mask_v = torch.cat((torch.ones([B, 31]), torch.zeros([B, 1])), dim=1).view(B, 32, 1, 1, 1).expand_as(x0_video).bool() 
+        # mask_a = torch.cat((torch.ones([B, 157]), torch.zeros([B, 3])), dim=1).view(B, 160, 1).expand_as(x0_audio).bool()
+
+        # NOTE: original logic: masking t=0 blocks
         mask_pad_v = torch.cat((torch.ones([B, 31]), torch.zeros([B, 1])), dim=1).to(self.device)
         mask_pad_a = torch.cat((torch.ones([B, 157]), torch.zeros([B, 3])), dim=1).to(self.device)
         mask_t_v = (timestep_v != 0)  # [B, 32]
@@ -127,6 +134,35 @@ class OviODERegression(OviBaseModel):
             "loss_video": loss_v.detach(),
             "loss_audio": loss_a.detach()
         }
+    
+    def _initialize_inference_pipeline(self):
+        if self.inference_pipeline is None:
+            self.inference_pipeline = OviSelfForcingTrainingPipeline(
+                model_name=self.generator_name,
+                denoising_step_list=self.denoising_step_list,
+                scheduler=self.scheduler,
+                generator=self.generator,
+                num_blocks=self.num_blocks,
+                vid_block_size=self.num_frame_per_block_vid,
+                aud_block_size=self.num_frame_per_block_aud,
+                num_training_frames_video=32,
+                num_training_frames_audio=160,
+                start_gradient_frame_index_video=0,
+                context_noise=0.0,
+                last_step_only=False,
+                same_step_accross_blocks=False,
+            )
+
+    @torch.no_grad()
+    def full_inference(self, noises, wan22_image_latent, **conditional_dict):
+        if self.inference_pipeline is None:
+            self._initialize_inference_pipeline()
+        
+        return self.inference_pipeline.full_inference(
+            noises=noises,
+            wan22_image_latent=wan22_image_latent,
+            **conditional_dict
+        )
     
 class OviODERegressionDebug(OviBaseModel):
     def __init__(self, args, device):
@@ -339,7 +375,7 @@ if __name__ == "__main__":
             self.model_name = "Ovi"
             self.generator_name = "Ovi"
             self.generator_type = "causal"
-            self.generator_path = "/cpfs01/gongshukai/step_distillation/logs/ovi_ode_init/checkpoint_model_005000/model.pt"
+            self.generator_path = "/cpfs01/gongshukai/step_distillation/logs/ovi_ode_init_1229/checkpoint_model_010000/checkpoint.pt"
 
             self.model_kwargs = {
                 "timestep_shift": 5.0
@@ -357,7 +393,7 @@ if __name__ == "__main__":
     dtype = torch.bfloat16 if args.mixed_precision else torch.float32
 
     
-    dataset = OviODERegressionDataset(data_path="/cpfs01/gongshukai/step_distillation/data/ode_pairs_debug")
+    dataset = OviODERegressionDataset(data_path="/cpfs01/gongshukai/step_distillation/data/ode_pairs_overfit")
     sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=True, drop_last=True)
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=2, sampler=sampler, num_workers=4

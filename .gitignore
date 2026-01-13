@@ -251,3 +251,6 @@ logs/
 *deprecated*
 *.mp4
 *.ipynb
+
+trainer/*_old.py
+model/*_old.py

@@ -3,7 +3,7 @@
 import gc
 import logging
 from utils.dataset import OviODERegressionDataset, cycle, process_visual
-from model.ovi_ode_regression import OviODERegression # <--- Will define this next
+from model.ovi_sf_regression import OviSelfForcingRegression # <--- Will define this next
 from collections import defaultdict
 from utils.misc import set_seed, merge_dict_list
 from utils.ovi_wrapper import remap_ovi_state_dict_for_refactored
@@ -21,6 +21,7 @@ from ovi.utils.io_utils import save_video
 import csv
 import tempfile
 import numpy as np
+from transformers import get_cosine_schedule_with_warmup, get_constant_schedule_with_warmup
 
 logger = logging.getLogger(__name__)
 
@@ -78,10 +79,10 @@ class Trainer:
         self.output_path = config.logdir
 
         # --- Step 2: Model Init ---
-        logger.info(f"Initializing Ovi ODE Regression Model...") if self.is_main_process else None
+        logger.info(f"Initializing Ovi Self Forcing Regression Model...") if self.is_main_process else None
         assert config.distribution_loss == "ode", "Only ODE loss is supported for ODE training"
-        self.model = OviODERegression(config, device=self.device)
-        logger.info(f"Finished initializing the distillation model.") if self.is_main_process else None
+        self.model = OviSelfForcingRegression(config, device=self.device)
+        logger.info(f"Finished initializing the Self Forcing Regression model.") if self.is_main_process else None
         
         # Load checkpoint (model weights only, optimizer will be loaded after FSDP wrapping)
         pretrained_ckpt_path, self.step = self.load(self.output_path)
@@ -134,7 +135,24 @@ class Trainer:
             weight_decay=config.weight_decay
         )
         logger.info("Finished setting up optimizers.") if self.is_main_process else None
-
+        
+        self.lr_schedule_type = getattr(config, "lr_schedule", "constant")
+        self.warmup_steps = getattr(config, "warmup_steps", 0)
+        if self.lr_schedule_type == "cosine":
+            self.max_train_steps = getattr(config, "max_train_steps", 30000)
+            logger.info(f"Using Cosine LR Schedule with warmup={self.warmup_steps}, max_steps={self.max_train_steps}") if self.is_main_process else None
+            self.lr_scheduler = get_cosine_schedule_with_warmup(
+                optimizer=self.generator_optimizer,
+                num_warmup_steps=self.warmup_steps,
+                num_training_steps=self.max_train_steps
+            )
+        else:
+            logger.info(f"Using Constant LR Schedule with warmup={self.warmup_steps}") if self.is_main_process else None
+            self.lr_scheduler = get_constant_schedule_with_warmup(
+                optimizer=self.generator_optimizer,
+                num_warmup_steps=self.warmup_steps
+            )
+            
         # Load optimizer state if resuming (must be done AFTER FSDP wrapping and optimizer creation)
         if pretrained_ckpt_path is not None and state_dict is not None:
             if state_dict.get("generator_optimizer", None) is not None:
@@ -149,7 +167,15 @@ class Trainer:
                 logger.info("Generator optimizer state loaded") if self.is_main_process else None
             else:
                 logger.info("No generator_optimizer found in checkpoint, starting with fresh optimizer state") if self.is_main_process else None
-        
+
+            if "lr_scheduler" in state_dict:
+                logger.info("Loading lr_scheduler state from checkpoint") if self.is_main_process else None
+                self.lr_scheduler.load_state_dict(state_dict["lr_scheduler"])
+            else:
+                if self.step > 0:
+                    logger.info(f"No lr_scheduler in checkpoint. Manually stepping scheduler {self.step} times to sync.") if self.is_main_process else None
+                    for _ in range(self.step): self.lr_scheduler.step()
+
         # Free memory after loading
         del state_dict
         gc.collect()
@@ -240,6 +266,7 @@ class Trainer:
                 self.generator_optimizer
             ),
             "step": self.step,
+            "lr_scheduler": self.lr_scheduler.state_dict()
         }
         
         if self.is_main_process:
@@ -343,7 +370,7 @@ class Trainer:
         return wandb_log
 
 
-    def fwdbwd_one_step(self, batch):
+    def fwdbwd_one_step(self, batch, log_video=False):
         """Forward and backward for one step (no optimizer step)."""
         self.model.eval()  # Ovi is trained in Eval mode (no dropout)
         
@@ -360,7 +387,8 @@ class Trainer:
         loss, log_dict = self.model.generator_loss(
             video_ode_latent=video_ode_latent,
             audio_ode_latent=audio_ode_latent,
-            conditional_dict=conditional_dict
+            conditional_dict=conditional_dict,
+            log_video=log_video
         )
         
         if self.gradient_accumulation_steps > 1:
@@ -384,12 +412,13 @@ class Trainer:
             
             for accum_step in tqdm(range(self.gradient_accumulation_steps), total=len(range(self.gradient_accumulation_steps)), desc="Gradient accumulating for ODE pretraining", leave=False, disable=(dist.get_rank()!=0)):
                 batch = next(self.dataloader)
-                log_dict = self.fwdbwd_one_step(batch)
+                log_dict = self.fwdbwd_one_step(batch, LOG_VIDEO)
             
             # Optimizer step after accumulation
             grad_norm = self.model.generator.clip_grad_norm_(self.max_grad_norm)
             self.generator_optimizer.step()
-            
+            self.lr_scheduler.step()
+
             self.step += 1
 
             # Logging (use the last step's log_dict)
@@ -407,12 +436,18 @@ class Trainer:
                     "loss": log_dict["loss"].item(),
                     "grad_norm": grad_norm.item(),
                     "video_loss": log_dict["loss_video"].item(),
-                    "audio_loss": log_dict["loss_audio"].item()
+                    "audio_loss": log_dict["loss_audio"].item(),
+                    "lr": self.lr_scheduler.get_last_lr()[0],
                 }
+                if LOG_VIDEO: 
+                    wandb_log.update({
+                        "Visualization/Generated_Video_Audio": wandb.Video(log_dict['generated_video_audio'], format="mp4"),
+                        "Visualization/Ground_Truth_Video_Audio": wandb.Video(log_dict['gt_video_audio'], format="mp4"),
+                    })
                 if not self.config.disable_wandb:
                     wandb.log(wandb_log, step=self.step)
                 
-                logger.info(f"Step {self.step}: ODE Loss={wandb_log['loss']:.4f}, Video ODE Loss={wandb_log['video_loss']:.4f}, Audio ODE Loss={wandb_log['audio_loss']:.4f}, Grad Norm={wandb_log['grad_norm']:.4f}")
+                logger.info(f"Step {self.step}: ODE Loss={wandb_log['loss']:.4f}, Video ODE Loss={wandb_log['video_loss']:.4f}, Audio ODE Loss={wandb_log['audio_loss']:.4f}, Grad Norm={wandb_log['grad_norm']:.4f}, LR={wandb_log['lr']:.6f}")
 
             if self.step > 0 and self.step % self.config.log_iters == 0:
                 self.save()

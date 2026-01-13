@@ -60,6 +60,7 @@ class OviDMD(OviSelfForcingModel):
         unconditional_dict: dict,
         normalization: bool = True,
         wan22_image_latent: Optional[torch.Tensor] = None,
+        log_video: Optional[bool] = False,
     ) -> Tuple[Tuple[torch.Tensor, torch.Tensor], dict]:
         """
         Compute the KL grad for both video and audio branches.
@@ -156,6 +157,18 @@ class OviDMD(OviSelfForcingModel):
             "dmdtrain_gradient_norm_audio": torch.mean(torch.abs(grad_audio)).detach(),
             "timestep": timestep.detach()
         }
+
+        if log_video and dist.get_rank() == 0:
+            logger.info("Logging video and audio latents from real and fake scores...")
+            real_video_log_dict = self.log_video_audio(
+                pred_latents=(pred_real_video.detach(), pred_real_audio.detach()), key_name="real_video_audio"
+            )
+            fake_video_log_dict = self.log_video_audio(
+                pred_latents=(pred_fake_video.detach(), pred_fake_audio.detach()), key_name="fake_video_audio"
+            )
+            log_dict.update(real_video_log_dict)
+            log_dict.update(fake_video_log_dict)
+
         return grads, log_dict
 
     def compute_distribution_matching_loss(
@@ -167,6 +180,7 @@ class OviDMD(OviSelfForcingModel):
         denoised_timestep_from: int = 0,
         denoised_timestep_to: int = 0,
         wan22_image_latent: Optional[torch.Tensor] = None,
+        log_video: Optional[bool] = False,
     ) -> Tuple[torch.Tensor, dict]:
         """
         Compute the combined DMD loss for both video and audio branches.
@@ -209,6 +223,7 @@ class OviDMD(OviSelfForcingModel):
                 conditional_dict=conditional_dict,
                 unconditional_dict=unconditional_dict,
                 wan22_image_latent=wan22_image_latent,
+                log_video=log_video,
             )
             grad_video, grad_audio = grads
 
@@ -261,28 +276,33 @@ class OviDMD(OviSelfForcingModel):
             denoised_timestep_from=denoised_timestep_from, # 500 for exit step 2
             denoised_timestep_to=denoised_timestep_to,     # 250 for exit step 2
             wan22_image_latent=wan22_image_latent,         # clean first frame latent
+            log_video=log_video,
         )
 
         if log_video and dist.get_rank() == 0:
-            logger.info("Logging video and audio latents from generator rollout...")
-            with torch.no_grad():
-                video_latent, audio_latent = pred_latents
-                device, dtype = 'cuda', torch.bfloat16 # NOTE: hard coded since the vae is bfloat16
-                video_latent = video_latent[:1].to(device, dtype)
-                audio_latent = audio_latent[:1].transpose(1, 2).to(device, dtype)
-                video = self.vae.decode_video(video_latent) # [B, C, F, H, W]
-                audio = self.vae.decode_audio(audio_latent) # [B, L]
-                video = ((video + 1) / 2 * 255).clip(0, 255)
-                video_np = video.squeeze(0).permute(1, 0, 2, 3).cpu().float().numpy().astype(np.uint8)
-                audio_np = audio.squeeze(0).cpu().float().numpy().flatten()
-                # create a temp file and save to it
-                with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-                    save_video(
-                        output_path=f.name,
-                        video_numpy=video_np,
-                        audio_numpy=audio_np
-                    )
-                dmd_log_dict['generated_video_audio'] = f.name
+            video_log_dict = self.log_video_audio(pred_latents)
+            dmd_log_dict.update(video_log_dict)
+
+        # if log_video and dist.get_rank() == 0:
+        #     logger.info("Logging video and audio latents from generator rollout...")
+        #     with torch.no_grad():
+        #         video_latent, audio_latent = pred_latents
+        #         device, dtype = 'cuda', torch.bfloat16 # NOTE: hard coded since the vae is bfloat16
+        #         video_latent = video_latent[:1].to(device, dtype)
+        #         audio_latent = audio_latent[:1].transpose(1, 2).to(device, dtype)
+        #         video = self.vae.decode_video(video_latent) # [B, C, F, H, W]
+        #         audio = self.vae.decode_audio(audio_latent) # [B, L]
+        #         video = ((video + 1) / 2 * 255).clip(0, 255)
+        #         video_np = video.squeeze(0).permute(1, 0, 2, 3).cpu().float().numpy().astype(np.uint8)
+        #         audio_np = audio.squeeze(0).cpu().float().numpy().flatten()
+        #         # create a temp file and save to it
+        #         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+        #             save_video(
+        #                 output_path=f.name,
+        #                 video_numpy=video_np,
+        #                 audio_numpy=audio_np
+        #             )
+        #         dmd_log_dict['generated_video_audio'] = f.name
 
         del pred_latents, gradient_mask, denoised_timestep_from, denoised_timestep_to
         return dmd_loss, dmd_log_dict
@@ -397,3 +417,26 @@ class OviDMD(OviSelfForcingModel):
         }
 
         return total_denoising_loss, critic_log_dict
+
+    def log_video_audio(self, pred_latents, key_name="generated_video_audio"):
+        video_log_dict = {}
+        logger.info("Logging video and audio latents from generator rollout...")
+        with torch.no_grad():
+            video_latent, audio_latent = pred_latents
+            device, dtype = 'cuda', torch.bfloat16 # NOTE: hard coded since the vae is bfloat16
+            video_latent = video_latent[:1].to(device, dtype)
+            audio_latent = audio_latent[:1].transpose(1, 2).to(device, dtype)
+            video = self.vae.decode_video(video_latent) # [B, C, F, H, W]
+            audio = self.vae.decode_audio(audio_latent) # [B, L]
+            video = ((video + 1) / 2 * 255).clip(0, 255)
+            video_np = video.squeeze(0).permute(1, 0, 2, 3).cpu().float().numpy().astype(np.uint8)
+            audio_np = audio.squeeze(0).cpu().float().numpy().flatten()
+            # create a temp file and save to it
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+                save_video(
+                    output_path=f.name,
+                    video_numpy=video_np,
+                    audio_numpy=audio_np
+                )
+            video_log_dict[key_name] = f.name
+        return video_log_dict

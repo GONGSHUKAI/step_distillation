@@ -19,7 +19,7 @@ generator_name: Ovi             # student model, trainable
 generator_type: causal   # bidirectional diffusion, not causal diffusion
 real_path: /cpfs01/gongshukai/weights/Ovi/Ovi/model.safetensors
 fake_path: /cpfs01/gongshukai/weights/Ovi/Ovi/model.safetensors
-generator_ckpt: /cpfs01/gongshukai/step_distillation/logs/ovi_ode_init/checkpoint_model_019000/model.pt
+generator_ckpt: /cpfs01/gongshukai/step_distillation/logs/ovi_sf_pretrain_ovi_original/checkpoint_model_010000/checkpoint.pt
 
 ## Ovi Self Forcing Distillation settings
 distribution_loss: dmd            
@@ -84,7 +84,7 @@ num_keep_checkpoints: 2
 video_log_iters: 100
 
 ## Dataset settings
-data_path: data/ovi_dataset_part2.csv
+data_path: data/ovi_dataset_part1_dedup.csv
 num_frames: 121
 h: 704
 w: 1280
