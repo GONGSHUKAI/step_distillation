@@ -292,6 +292,14 @@ class Trainer: # MODIFIED: Renamed class
             f"Node Rank: {os.environ.get('NODE_RANK')}"
         )
         
+        if rank == 0:
+            default_pg = dist.distributed_c10d._get_default_group()
+            pg_size = dist.get_world_size(default_pg)
+            pg_rank = dist.get_rank(default_pg)
+            logger.info(f"default_pg_size={pg_size}, default_pg_rank={pg_rank}")
+            for key in ["NCCL_CROSS_NIC", "NCCL_IB_DISABLE", "NCCL_SOCKET_IFNAME", "NCCL_DEBUG"]:
+                print(f"{key}={os.environ.get(key, 'not set')}")
+
         if dist.is_initialized():
             dist.barrier()
 
@@ -418,6 +426,7 @@ class Trainer: # MODIFIED: Renamed class
                 wan22_image_latent=wan22_image_latent,
                 log_video=log_video,
             )
+            del conditional_dict, unconditional_dict, wan22_image_latent
             torch.cuda.empty_cache()
             
             # === MODIFIED: Scale loss for gradient accumulation ===
@@ -430,6 +439,8 @@ class Trainer: # MODIFIED: Renamed class
                 "generator_loss": generator_loss * self.gradient_accumulation_steps,  # Log unscaled loss
                 "generator_grad_norm": generator_grad_norm}
             )
+            del generator_loss
+            torch.cuda.empty_cache()
             return generator_log_dict
         else:
             generator_log_dict = {}
@@ -441,7 +452,9 @@ class Trainer: # MODIFIED: Renamed class
             unconditional_dict=unconditional_dict,
             wan22_image_latent=wan22_image_latent,
         )
-        
+
+        del conditional_dict, unconditional_dict, wan22_image_latent
+        torch.cuda.empty_cache()
         # === MODIFIED: Scale loss for gradient accumulation ===
         if self.gradient_accumulation_steps > 1:
             critic_loss = critic_loss / self.gradient_accumulation_steps
@@ -452,6 +465,8 @@ class Trainer: # MODIFIED: Renamed class
             "critic_loss": critic_loss * self.gradient_accumulation_steps,  # Log unscaled loss
             "critic_grad_norm": critic_grad_norm}
         )
+        del critic_loss
+        torch.cuda.empty_cache()
         return critic_log_dict
     
     def _load_eval_csv(self, csv_path: str, max_len=5):
@@ -587,6 +602,8 @@ class Trainer: # MODIFIED: Renamed class
                 TRAIN_GENERATOR
                 and (self.step % self.config.video_log_iters == 0)
             )
+            torch.cuda.empty_cache()
+            gc.collect()
             # Train Generator
             if TRAIN_GENERATOR:
                 self.generator_optimizer.zero_grad(set_to_none=True)
@@ -598,9 +615,13 @@ class Trainer: # MODIFIED: Renamed class
                         train_generator=True,
                         log_video=log_video_this_step
                     )
+                    del batch
+                    if accum_step < self.gradient_accumulation_steps - 1:
+                        torch.cuda.empty_cache()
                 
                 if not self.config.debug:
                     self.generator_optimizer.step()
+                    torch.cuda.empty_cache()
                     if self.generator_ema is not None: 
                         self.generator_ema.update(self.model.generator)
             
@@ -609,8 +630,12 @@ class Trainer: # MODIFIED: Renamed class
             for accum_step in tqdm(range(self.gradient_accumulation_steps), total=len(range(self.gradient_accumulation_steps)), desc="Gradient accumulating for critic", leave=False, disable=(dist.get_rank()!=0)):
                 batch = next(self.dataloader)
                 critic_log_dict = self.fwdbwd_one_step(batch, train_generator=False)
+                del batch
+                if accum_step < self.gradient_accumulation_steps - 1:
+                    torch.cuda.empty_cache()
             if not self.config.debug:
                 self.critic_optimizer.step()
+                torch.cuda.empty_cache()
                 
             self.step += 1
             

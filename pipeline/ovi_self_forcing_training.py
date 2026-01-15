@@ -294,8 +294,8 @@ class OviSelfForcingTrainingPipeline(torch.nn.Module):
                     x0_v = x0_v.to(dtype)
                 # print(f"Updating KV Cache with t=0, {torch.is_grad_enabled()=}") if torch.distributed.get_rank()==0 else None
                 self.generator(
-                    video_latent=x0_v,
-                    audio_latent=x0_a,
+                    video_latent=x0_v.detach(),
+                    audio_latent=x0_a.detach(),
                     timestep_v=t_context_v,
                     timestep_a=t_context_a,
                     conditional_dict=conditional_dict,
