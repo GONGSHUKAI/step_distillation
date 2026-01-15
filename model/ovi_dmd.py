@@ -226,6 +226,7 @@ class OviDMD(OviSelfForcingModel):
                 log_video=log_video,
             )
             grad_video, grad_audio = grads
+            del noisy_video, noisy_audio, video_noise, audio_noise
 
         # Step 3: Calculate MSE loss for each branch and sum them up
         # --- Video Loss ---
@@ -237,7 +238,7 @@ class OviDMD(OviSelfForcingModel):
         
         # --- Audio Loss ---
         dmd_loss_audio = 0.5 * F.mse_loss(audio_latent.double(), (audio_latent.double() - grad_audio.double()).detach(), reduction="mean")
-
+        del grad_video, grad_audio
         # --- Combine Losses ---
         # A simple sum is used here. You could introduce a weighting factor if needed.
         # total_dmd_loss = dmd_loss_video + dmd_loss_audio
@@ -424,8 +425,8 @@ class OviDMD(OviSelfForcingModel):
         with torch.no_grad():
             video_latent, audio_latent = pred_latents
             device, dtype = 'cuda', torch.bfloat16 # NOTE: hard coded since the vae is bfloat16
-            video_latent = video_latent[:1].to(device, dtype)
-            audio_latent = audio_latent[:1].transpose(1, 2).to(device, dtype)
+            video_latent = video_latent[:1].detach().clone().to(device, dtype)
+            audio_latent = audio_latent[:1].detach().clone().transpose(1, 2).to(device, dtype)
             video = self.vae.decode_video(video_latent) # [B, C, F, H, W]
             audio = self.vae.decode_audio(audio_latent) # [B, L]
             video = ((video + 1) / 2 * 255).clip(0, 255)
@@ -439,4 +440,5 @@ class OviDMD(OviSelfForcingModel):
                     audio_numpy=audio_np
                 )
             video_log_dict[key_name] = f.name
+            del video_latent, audio_latent, video, audio, video_np, audio_np
         return video_log_dict
